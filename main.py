@@ -699,11 +699,17 @@ if should_backup_today():
 try:
     _n = fetch_one("SELECT COUNT(*) n FROM members")["n"]
     if _n == 0:
+        # On supprime la base vide créée par init_db() pour permettre le seed
         try:
             import seed_data
-            seed_data.main()
-        except Exception:
-            pass
+            import importlib
+            importlib.reload(seed_data)
+            if os.path.exists(DB_PATH):
+                os.remove(DB_PATH)
+            seed_data.main(force=True)
+            st.toast("✅ Données de démonstration chargées", icon="🎲")
+        except Exception as _e:
+            st.error(f"Seed auto échoué : {_e}")
 except Exception:
     pass
 
