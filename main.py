@@ -98,11 +98,11 @@ def run_termux_setup():
         return False
 
 def launch_streamlit():
-    subprocess.run(["streamlit", "run", _file_,
+    subprocess.run(["streamlit", "run", __file__,
                     "--server.address=0.0.0.0", "--server.port=8501"])
 
 # --- CLI avant imports Streamlit ---
-if _name_ == "_main_" and len(sys.argv) > 1:
+if __name__ == "__main__" and len(sys.argv) > 1:
     _arg = sys.argv[1].lower()
     if _arg in ("--install-termux", "--install"):
         sys.exit(0 if run_termux_setup() else 1)
@@ -110,7 +110,7 @@ if _name_ == "_main_" and len(sys.argv) > 1:
         launch_streamlit()
         sys.exit(0)
     elif _arg in ("-h", "--help"):
-        print(_doc_)
+        print(__doc__)
         sys.exit(0)
     elif _arg == "--machine-id":
         # Utile pour générer une licence client
@@ -209,7 +209,7 @@ def generate_license(client_name: str, machine: str, expires: str) -> str:
     return json.dumps({"payload": payload, "signature": sig}, indent=2)
 
 
-def verify_license(path: str = LICENSE_FILE) -> tuple[bool, str]:
+def verify_license(path: str = LICENSE_FILE):
     if LICENSE_SECRET.startswith("REMPLACER"):
         return True, "Mode développeur (licence non configurée)."
     if not os.path.exists(path):
@@ -253,7 +253,7 @@ def license_gate():
 # BASE DE DONNÉES (SQLite)
 # ============================================================
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -434,7 +434,7 @@ def execute_many(q, params_list):
 # ============================================================
 # SAUVEGARDE AUTO
 # ============================================================
-def auto_backup(keep_days: int = 60) -> str | None:
+def auto_backup(keep_days: int = 60):
     try:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = os.path.join(BACKUP_DIR, f"backup_{stamp}.zip")
@@ -483,7 +483,9 @@ def auto_category(age):
 
 
 def slug(s):
-    return re.sub(r"-+", "-", re.sub(r"[^a-zA-Z0-9]+", "", s or "")).strip("")
+    """Nettoie une chaîne pour l'utiliser dans un nom de fichier."""
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", (s or "").strip())
+    return s.strip("_") or "sans_nom"
 
 
 def login(u, p):
@@ -525,7 +527,7 @@ def verify_qr_payload(payload: str):
         return None
 
 
-def make_qr_code(m) -> tuple[str, str]:
+def make_qr_code(m):
     data = build_qr_payload(m["id"], m.get("license_number") or "")
     img = qrcode.make(data)
     path = os.path.join(QR_DIR, f"qr_{m['id']}_{slug(full_name(m))}.png")
@@ -608,7 +610,7 @@ def _draw_card(pdf, x, y, m, qr_path):
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_xy(x + 2, y + 12)
     pdf.cell(0, 5, _t(f"{m['first_name']} {m['last_name']}"[:26]), ln=1)
-    pdf.set_font("Helvetica", "", 😎
+    pdf.set_font("Helvetica", "", 8)
     pdf.set_xy(x + 2, y + 19); pdf.cell(0, 4, _t(f"Grade : {m.get('grade') or '—'}"), ln=1)
     pdf.set_xy(x + 2, y + 24); pdf.cell(0, 4, _t(f"Licence : {m.get('license_number') or '—'}"), ln=1)
     pdf.set_font("Helvetica", "I", 6); pdf.set_text_color(120, 120, 120)
@@ -622,7 +624,7 @@ def _draw_card(pdf, x, y, m, qr_path):
     pdf.set_text_color(0, 0, 0)
 
 
-def generate_member_card_pdf(m) -> str:
+def generate_member_card_pdf(m):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
     qr_path, _ = make_qr_code(m)
@@ -631,7 +633,7 @@ def generate_member_card_pdf(m) -> str:
     pdf.output(path); return path
 
 
-def generate_batch_cards_pdf(members) -> str:
+def generate_batch_cards_pdf(members):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
     mx, my, gx, gy = 12, 15, 6, 6
@@ -931,17 +933,25 @@ def page_members():
             c3.metric("Statut", m["status"] or "-")
 
             col_qr, col_act = st.columns([1, 2])
-            qr_path, _ = make_qr_code(m)
             with col_qr:
-                st.image(qr_path, caption="QR membre", width=200)
+                if st.button("🔄 Générer QR", key=f"qr_gen_{m['id']}"):
+                    st.session_state[f"qr_show_{m['id']}"] = True
+                if st.session_state.get(f"qr_show_{m['id']}"):
+                    qr_path, _ = make_qr_code(m)
+                    st.image(qr_path, caption="QR membre", width=200)
+                    with open(qr_path, "rb") as f:
+                        st.download_button("📱 Télécharger QR", f.read(),
+                                            os.path.basename(qr_path), "image/png",
+                                            key=f"qr_dl_{m['id']}")
             with col_act:
-                pdf_path = make_member_pdf(m)
-                with open(pdf_path, "rb") as f:
-                    st.download_button("📄 Fiche PDF", f.read(),
-                                        os.path.basename(pdf_path), "application/pdf")
-                with open(qr_path, "rb") as f:
-                    st.download_button("📱 QR", f.read(),
-                                        os.path.basename(qr_path), "image/png")
+                if st.button("📄 Générer fiche PDF", key=f"pdf_gen_{m['id']}"):
+                    st.session_state[f"pdf_show_{m['id']}"] = True
+                if st.session_state.get(f"pdf_show_{m['id']}"):
+                    pdf_path = make_member_pdf(m)
+                    with open(pdf_path, "rb") as f:
+                        st.download_button("⬇️ Télécharger la fiche", f.read(),
+                                            os.path.basename(pdf_path), "application/pdf",
+                                            key=f"pdf_dl_{m['id']}")
 
             st.divider()
             sub1, sub2, sub3, sub4 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences", "👨‍👩‍👧 Parents"])
@@ -1127,14 +1137,16 @@ def page_attendance():
                 ex = {a["member_id"]: a["status"] for a in fetch_all(
                     "SELECT member_id, status FROM attendance WHERE course_id=? AND attendance_date=?",
                     (course["id"], d.isoformat()))}
+                keys = list(ATTENDANCE_STATUS.keys())
                 with st.form("att"):
                     statuses = {}
                     for m in ms:
                         curr = ex.get(m["id"], "present")
+                        idx = keys.index(curr) if curr in keys else 0
                         statuses[m["id"]] = st.selectbox(
                             full_name(m),
-                            list(ATTENDANCE_STATUS.keys()),
-                            index=list(ATTENDANCE_STATUS.keys()).index(curr),
+                            keys,
+                            index=idx,
                             format_func=lambda x: ATTENDANCE_STATUS[x],
                             key=f"att_{m['id']}"
                         )
@@ -1521,15 +1533,18 @@ def page_qr_cards():
                                     os.path.basename(path), "application/pdf")
 
     with t3:
-        cols = st.columns(4)
-        for i, m in enumerate(ms):
-            path, data = make_qr_code(m)
-            with cols[i % 4]:
-                st.image(path, caption=full_name(m), width=150)
-                with open(path, "rb") as f:
-                    st.download_button("⬇️", f.read(),
-                                        os.path.basename(path), "image/png",
-                                        key=f"dl_{m['id']}")
+        if st.button("🔄 Générer tous les QR", type="primary"):
+            st.session_state["qr_all_shown"] = True
+        if st.session_state.get("qr_all_shown"):
+            cols = st.columns(4)
+            for i, m in enumerate(ms):
+                path, data = make_qr_code(m)
+                with cols[i % 4]:
+                    st.image(path, caption=full_name(m), width=150)
+                    with open(path, "rb") as f:
+                        st.download_button("⬇️", f.read(),
+                                            os.path.basename(path), "image/png",
+                                            key=f"dl_{m['id']}")
 
 
 def page_admin():
@@ -1637,8 +1652,11 @@ def page_my_space():
     c1.metric("Âge", calc_age(m["birth_date"]) or "-")
     c2.metric("Grade", m["grade"] or "-")
     c3.metric("Statut", m["status"])
-    qr_path, _ = make_qr_code(m)
-    st.image(qr_path, width=180, caption="Mon QR")
+    if st.button("🔄 Afficher mon QR"):
+        st.session_state["myspace_qr"] = True
+    if st.session_state.get("myspace_qr"):
+        qr_path, _ = make_qr_code(m)
+        st.image(qr_path, width=180, caption="Mon QR")
 
     st.divider()
     sub1, sub2, sub3 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences"])
@@ -1670,12 +1688,12 @@ def page_my_space():
 
 def page_install():
     st.title("🛠️ Installation & Déploiement")
-    st.markdown(f"*Dossier de données* : {DATA_DIR}")
-    st.info(f*Machine ID** :{machine_id()}`")
+    st.markdown(f"**Dossier de données** : `{DATA_DIR}`")
+    st.info(f"**Machine ID** : `{machine_id()}`")
 
     env = "🟢 Termux (Android)" if is_termux() else (
           "🟢 Linux/macOS" if platform.system() in ("Linux", "Darwin") else "🟢 Windows")
-    st.write(f"*Environnement* : {env}")
+    st.write(f"**Environnement** : {env}")
 
     tab_pc, tab_cloud, tab_termux, tab_bash = st.tabs(
         ["💻 PC", "☁️ Cloud", "📱 Termux", "📜 Script bash"])
@@ -1698,7 +1716,7 @@ streamlit run main.py
         2. https://share.streamlit.io → New app → choisir le repo.
         3. Main file : main.py. Deploy.
 
-        ⚠️ Sur Streamlit Cloud, la base SQLite est *éphémère*.
+        ⚠️ Sur Streamlit Cloud, la base SQLite est **éphémère**.
         Pour un usage réel, hébergez sur un VPS ou en local.
         """)
 
