@@ -1,94 +1,48 @@
 """
 🥋 Gestion Dojo Karaté — Application complète mono-dojo (local-first)
 ====================================================================
-
-Fonctionnalités :
-  - Authentification sécurisée (bcrypt) + rôles (admin / prof / secrétaire / membre)
-  - Licence hors ligne (HMAC signé sur machine_id)
-  - Membres : archivage, historique, parents, mineurs, dossier médical, photo, signature
-  - Cours + planning hebdo/mensuel + séances exceptionnelles + photos de classe
-  - Présences : présent / absent / justifié / retard / consultation + scan QR
-  - Paiements : payé / partiel / en retard + reçus PDF + "qui doit payer"
-  - Grades & Examens : jury, notes, admis/ajourné + historique
-  - Compétitions : catégories, résultats, médailles
-  - QR codes sécurisés (HMAC) + cartes membres PDF (individuel + lot)
-  - Trombinoscope PDF (individuel, par cours, général)
-  - Signature électronique parentale (canvas)
-  - Import CSV en masse de membres
-  - Sauvegarde automatique quotidienne (ZIP) + restauration manuelle
-  - Export CSV de toutes les données
-
 Déploiement :
-  - PC       : python -m venv venv && pip install -r requirements.txt
-                streamlit run main.py
-  - Termux   : python main.py --install-termux
-                python main.py --run
-  - Cloud    : voir options dans l'interface (page Installation)
-
-Configuration licence (à faire par le développeur) :
-  1. Générer un secret : python -c "import secrets; print(secrets.token_urlsafe(32))"
-  2. Remplacer LICENSE_SECRET ci-dessous
-  3. Pour émettre une licence client :
-        from main import generate_license
-        print(generate_license("Dojo Tlemcen", "MACHINE_ID_DU_CLIENT", "2026-10-08"))
+  - PC       : pip install -r requirements.txt && streamlit run main.py
+  - Termux   : python main.py --install-termux && python main.py --run
 """
 
 import sys, os, subprocess, platform, shutil, io, json, hmac, hashlib, uuid, zipfile
-import sqlite3
-import base64
-import re
+import sqlite3, base64, re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
 # ============================================================
-# BASH EMBARQUÉ — Installation automatique Termux (Android)
+# BASH TERMUX
 # ============================================================
 TERMUX_BASH_SETUP = r"""
 set -e
 echo "▶ Mise à jour des paquets..."
 pkg update -y && pkg upgrade -y
-
 echo "▶ Installation des dépendances système..."
 pkg install -y python libjpeg-turbo libpng openssl libxml2 libxslt clang
-
-echo "▶ Autorisation d'accès au stockage..."
 termux-setup-storage || true
-
-echo "▶ Mise à jour de pip..."
 pip install --upgrade pip wheel setuptools
-
-echo "▶ Installation des paquets Python..."
 pip install -r requirements.txt
-
-echo "▶ Création du dossier de stockage local..."
 mkdir -p /storage/emulated/0/DojoKaraté/exports
 mkdir -p /storage/emulated/0/DojoKaraté/qrcodes
 mkdir -p /storage/emulated/0/DojoKaraté/backups
 mkdir -p /storage/emulated/0/DojoKaraté/photos
-
 if ! grep -q "DOJO_DATA_DIR" ~/.bashrc 2>/dev/null; then
     echo 'export DOJO_DATA_DIR=/storage/emulated/0/DojoKaraté' >> ~/.bashrc
 fi
-
 echo ""
 echo "✅ Installation terminée !"
 echo "Lancement : python main.py --run"
-echo "Puis Chrome : http://localhost:8501"
 """
 
 def is_termux():
-    return ("ANDROID_ROOT" in os.environ
-            or "ANDROID_DATA" in os.environ
+    return ("ANDROID_ROOT" in os.environ or "ANDROID_DATA" in os.environ
             or os.path.exists("/data/data/com.termux")
             or "com.termux" in os.environ.get("PREFIX", ""))
 
-def is_android_storage_available():
-    return os.path.exists("/storage/emulated/0")
-
 def run_termux_setup():
     if not is_termux():
-        print("⚠️  Ce script n'est destiné qu'à Termux (Android).")
-        print("Sur PC : pip install -r requirements.txt")
+        print("⚠️  Ce script est destiné à Termux uniquement.")
         return False
     script_path = os.path.expanduser("~/install_dojo.sh")
     with open(script_path, "w") as f:
@@ -105,25 +59,29 @@ def launch_streamlit():
     subprocess.run(["streamlit", "run", __file__,
                     "--server.address=0.0.0.0", "--server.port=8501"])
 
-# --- CLI avant imports Streamlit ---
 if __name__ == "__main__" and len(sys.argv) > 1:
     _arg = sys.argv[1].lower()
     if _arg in ("--install-termux", "--install"):
         sys.exit(0 if run_termux_setup() else 1)
     elif _arg == "--run":
-        launch_streamlit()
-        sys.exit(0)
+        launch_streamlit(); sys.exit(0)
     elif _arg in ("-h", "--help"):
-        print(__doc__)
-        sys.exit(0)
+        print(__doc__); sys.exit(0)
     elif _arg == "--machine-id":
         parts = [platform.node(), platform.machine(), str(uuid.getnode())]
         raw = "|".join(parts).encode()
-        print(hashlib.sha256(raw).hexdigest()[:16])
+        print(hashlib.sha256(raw).hexdigest()[:16]); sys.exit(0)
+    elif _arg == "--seed":
+        # Lance le seed de démonstration
+        try:
+            import seed_data
+            seed_data.main()
+        except Exception as e:
+            print(f"❌ {e}")
         sys.exit(0)
 
 # ============================================================
-# IMPORTS DE L'APPLICATION
+# IMPORTS
 # ============================================================
 import pandas as pd
 import streamlit as st
@@ -148,10 +106,9 @@ except Exception:
 # CONFIGURATION
 # ============================================================
 LICENSE_SECRET = "REMPLACER_PAR_UN_SECRET_DE_32_CARACTERES_MINIMUM_ALEATOIRES"
-# ⚠️ Générez le vôtre : python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-DATA_DIR = os.environ.get("DOJO_DATA_DIR",
-                          os.path.join(os.path.expanduser("~"), "DojoKaraté"))
+DATA_DIR   = os.environ.get("DOJO_DATA_DIR",
+                             os.path.join(os.path.expanduser("~"), "DojoKaraté"))
 EXPORT_DIR = os.path.join(DATA_DIR, "exports")
 QR_DIR     = os.path.join(DATA_DIR, "qrcodes")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
@@ -177,51 +134,35 @@ DAYS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
 PAYMENT_TYPES = ["Inscription", "Cotisation", "Licence", "Compétition",
                  "Stage", "Boutique", "Autre"]
 PAYMENT_METHODS = ["Espèces", "Chèque", "Virement", "CB", "En ligne"]
-PAYMENT_STATUS = {
-    "paid":    "Payé",
-    "pending": "Non payé",
-    "partial": "Partiellement payé",
-    "overdue": "En retard",
-}
+PAYMENT_STATUS = {"paid": "Payé", "pending": "Non payé",
+                  "partial": "Partiellement payé", "overdue": "En retard"}
 
-ATTENDANCE_STATUS = {
-    "present":      "Présent",
-    "absent":       "Absent",
-    "justified":    "Absence justifiée",
-    "late":         "Retard",
-    "consultation": "Consultation",
-}
+ATTENDANCE_STATUS = {"present": "Présent", "absent": "Absent",
+                     "justified": "Absence justifiée", "late": "Retard",
+                     "consultation": "Consultation"}
 
 ROLES = ["admin", "professeur", "secretaire", "membre"]
 
 st.set_page_config(page_title="Gestion Dojo", page_icon="🥋", layout="wide")
 
-
 # ============================================================
-# LICENCE (HMAC sur machine_id)
+# LICENCE
 # ============================================================
 def machine_id() -> str:
     parts = [platform.node(), platform.machine(), str(uuid.getnode())]
     raw = "|".join(parts).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
-
-def generate_license(client_name: str, machine: str, expires: str) -> str:
-    """À exécuter chez le développeur pour émettre une licence."""
-    payload = {
-        "client": client_name,
-        "machine": machine,
-        "expires": expires,   # 'YYYY-MM-DD' ou 'never'
-        "issued": date.today().isoformat(),
-    }
+def generate_license(client_name, machine, expires):
+    payload = {"client": client_name, "machine": machine,
+               "expires": expires, "issued": date.today().isoformat()}
     raw = json.dumps(payload, sort_keys=True).encode()
     sig = hmac.new(LICENSE_SECRET.encode(), raw, hashlib.sha256).hexdigest()
     return json.dumps({"payload": payload, "signature": sig}, indent=2)
 
-
-def verify_license(path: str = LICENSE_FILE):
+def verify_license(path=LICENSE_FILE):
     if LICENSE_SECRET.startswith("REMPLACER"):
-        return True, "Mode développeur (licence non configurée)."
+        return True, "Mode développeur."
     if not os.path.exists(path):
         return False, "Licence introuvable."
     try:
@@ -241,9 +182,8 @@ def verify_license(path: str = LICENSE_FILE):
             if date.fromisoformat(payload["expires"]) < date.today():
                 return False, f"Licence expirée le {payload['expires']}."
         except Exception:
-            return False, "Date d'expiration invalide."
-    return True, f"Licence valide — {payload['client']} (expire : {payload['expires']})"
-
+            return False, "Date invalide."
+    return True, f"Valide — {payload['client']}"
 
 def license_gate():
     ok, msg = verify_license()
@@ -251,166 +191,93 @@ def license_gate():
         return True
     st.error(f"🔒 {msg}")
     st.markdown("### Activation requise")
-    st.markdown("Envoyez cet identifiant à votre fournisseur pour obtenir votre licence :")
     st.code(machine_id(), language="text")
-    st.info("Placez ensuite le fichier license.key reçu dans le dossier "
-            f"{DATA_DIR} puis rechargez la page.")
     return False
 
-
 # ============================================================
-# BASE DE DONNÉES (SQLite)
+# BASE DE DONNÉES
 # ============================================================
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
+def hp(p): return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
 
-def hp(p: str) -> str:
-    return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
-
-
-def verify_pw(p: str, h: str) -> bool:
-    try:
-        return bcrypt.checkpw(p.encode(), h.encode())
-    except Exception:
-        return False
-
+def verify_pw(p, h):
+    try: return bcrypt.checkpw(p.encode(), h.encode())
+    except Exception: return False
 
 def init_db():
     conn = get_conn(); c = conn.cursor()
-
     c.executescript("""
     CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT NOT NULL,
-        member_id INTEGER,
-        created_at TEXT
-    );
+        username TEXT UNIQUE NOT NULL, password TEXT NOT NULL,
+        role TEXT NOT NULL, member_id INTEGER, created_at TEXT);
     CREATE TABLE IF NOT EXISTS members(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        first_name TEXT NOT NULL,
-        last_name TEXT NOT NULL,
-        birth_date TEXT,
-        gender TEXT,
-        phone TEXT,
-        email TEXT,
-        address TEXT,
-        blood_group TEXT,
-        academic_level TEXT,
-        category TEXT,
-        group_name TEXT,
-        license_number TEXT,
-        license_expiry TEXT,
-        medical_cert_expiry TEXT,
-        insurance_status TEXT,
-        insurance_expiry TEXT,
+        first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+        birth_date TEXT, gender TEXT, phone TEXT, email TEXT, address TEXT,
+        blood_group TEXT, academic_level TEXT, category TEXT, group_name TEXT,
+        license_number TEXT, license_expiry TEXT, medical_cert_expiry TEXT,
+        insurance_status TEXT, insurance_expiry TEXT,
         parental_authorization INTEGER DEFAULT 0,
         documents_status TEXT DEFAULT 'Incomplet',
-        grade TEXT,
-        grade_date TEXT,
-        discipline TEXT,
-        join_date TEXT,
-        status TEXT DEFAULT 'Actif',
-        notes TEXT,
-        photo TEXT
-    );
+        grade TEXT, grade_date TEXT, discipline TEXT,
+        join_date TEXT, status TEXT DEFAULT 'Actif', notes TEXT, photo TEXT);
     CREATE TABLE IF NOT EXISTS parents(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        first_name TEXT, last_name TEXT,
-        phone TEXT, email TEXT, address TEXT
-    );
+        first_name TEXT, last_name TEXT, phone TEXT, email TEXT, address TEXT);
     CREATE TABLE IF NOT EXISTS member_parents(
         member_id INTEGER, parent_id INTEGER,
-        relationship TEXT DEFAULT 'parent',
-        PRIMARY KEY(member_id, parent_id)
-    );
+        relationship TEXT DEFAULT 'parent', PRIMARY KEY(member_id, parent_id));
     CREATE TABLE IF NOT EXISTS courses(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        day_of_week INTEGER,
-        start_time TEXT, end_time TEXT,
-        room TEXT, teacher TEXT,
-        category TEXT, discipline TEXT,
-        capacity INTEGER DEFAULT 20,
-        active INTEGER DEFAULT 1
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+        day_of_week INTEGER, start_time TEXT, end_time TEXT,
+        room TEXT, teacher TEXT, category TEXT, discipline TEXT,
+        capacity INTEGER DEFAULT 20, active INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS sessions(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        course_id INTEGER,
-        session_date TEXT,
-        start_time TEXT, end_time TEXT,
-        room TEXT,
-        status TEXT DEFAULT 'planned',
-        is_exception INTEGER DEFAULT 0,
-        notes TEXT
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER,
+        session_date TEXT, start_time TEXT, end_time TEXT, room TEXT,
+        status TEXT DEFAULT 'planned', is_exception INTEGER DEFAULT 0, notes TEXT);
     CREATE TABLE IF NOT EXISTS enrollments(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id INTEGER, course_id INTEGER,
-        date_enrolled TEXT,
-        UNIQUE(member_id, course_id)
-    );
+        member_id INTEGER, course_id INTEGER, date_enrolled TEXT,
+        UNIQUE(member_id, course_id));
     CREATE TABLE IF NOT EXISTS attendance(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id INTEGER, course_id INTEGER,
-        attendance_date TEXT,
-        status TEXT DEFAULT 'present',
-        note TEXT,
-        UNIQUE(member_id, course_id, attendance_date)
-    );
+        member_id INTEGER, course_id INTEGER, attendance_date TEXT,
+        status TEXT DEFAULT 'present', note TEXT,
+        UNIQUE(member_id, course_id, attendance_date));
     CREATE TABLE IF NOT EXISTS payments(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id INTEGER,
-        amount REAL DEFAULT 0,
-        amount_paid REAL DEFAULT 0,
-        payment_date TEXT,
-        due_date TEXT,
-        method TEXT, type TEXT,
-        season TEXT,
-        status TEXT DEFAULT 'pending',
-        notes TEXT
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, member_id INTEGER,
+        amount REAL DEFAULT 0, amount_paid REAL DEFAULT 0,
+        payment_date TEXT, due_date TEXT, method TEXT, type TEXT,
+        season TEXT, status TEXT DEFAULT 'pending', notes TEXT);
     CREATE TABLE IF NOT EXISTS exams(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL, exam_date TEXT,
-        examiner TEXT, grade_targeted TEXT,
-        location TEXT, notes TEXT
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+        exam_date TEXT, examiner TEXT, grade_targeted TEXT,
+        location TEXT, notes TEXT);
     CREATE TABLE IF NOT EXISTS exam_candidates(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        exam_id INTEGER, member_id INTEGER,
-        grade_targeted TEXT,
-        score REAL, result TEXT,
-        observations TEXT,
-        UNIQUE(exam_id, member_id)
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, exam_id INTEGER, member_id INTEGER,
+        grade_targeted TEXT, score REAL, result TEXT, observations TEXT,
+        UNIQUE(exam_id, member_id));
     CREATE TABLE IF NOT EXISTS grades_history(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        member_id INTEGER, grade TEXT,
-        grade_date TEXT, examiner TEXT,
-        result TEXT, exam_id INTEGER, notes TEXT
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, member_id INTEGER, grade TEXT,
+        grade_date TEXT, examiner TEXT, result TEXT, exam_id INTEGER, notes TEXT);
     CREATE TABLE IF NOT EXISTS competitions(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT, competition_date TEXT,
-        location TEXT, description TEXT
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, competition_date TEXT,
+        location TEXT, description TEXT);
     CREATE TABLE IF NOT EXISTS competition_registrations(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        competition_id INTEGER, member_id INTEGER,
-        category TEXT, discipline TEXT,
-        result TEXT, ranking INTEGER, medal TEXT,
-        observations TEXT,
-        UNIQUE(competition_id, member_id)
-    );
+        id INTEGER PRIMARY KEY AUTOINCREMENT, competition_id INTEGER,
+        member_id INTEGER, category TEXT, discipline TEXT,
+        result TEXT, ranking INTEGER, medal TEXT, observations TEXT,
+        UNIQUE(competition_id, member_id));
     """)
     conn.commit()
 
-    # Migrations : colonnes ajoutées après coup
+    # Migrations
     for col, sqltype in (("photo", "TEXT"),
                          ("parental_signature", "TEXT"),
                          ("signature_date", "TEXT")):
@@ -418,9 +285,8 @@ def init_db():
             c.execute(f"ALTER TABLE members ADD COLUMN {col} {sqltype}")
             conn.commit()
         except sqlite3.OperationalError:
-            pass  # colonne déjà présente
+            pass
 
-    # Création admin par défaut si base vide
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users(username,password,role,created_at) VALUES(?,?,?,?)",
@@ -430,31 +296,22 @@ def init_db():
         conn.commit()
     conn.close()
 
-
 def fetch_all(q, p=()):
     conn = get_conn(); c = conn.cursor(); c.execute(q, p)
     r = [dict(x) for x in c.fetchall()]; conn.close(); return r
-
 
 def fetch_one(q, p=()):
     conn = get_conn(); c = conn.cursor(); c.execute(q, p)
     row = c.fetchone(); conn.close(); return dict(row) if row else None
 
-
 def execute(q, p=()):
     conn = get_conn(); c = conn.cursor(); c.execute(q, p); conn.commit()
     lid = c.lastrowid; conn.close(); return lid
 
-
-def execute_many(q, params_list):
-    conn = get_conn(); c = conn.cursor(); c.executemany(q, params_list)
-    conn.commit(); conn.close()
-
-
 # ============================================================
-# SAUVEGARDE AUTO
+# BACKUP
 # ============================================================
-def auto_backup(keep_days: int = 60):
+def auto_backup(keep_days=60):
     try:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dest = os.path.join(BACKUP_DIR, f"backup_{stamp}.zip")
@@ -468,27 +325,21 @@ def auto_backup(keep_days: int = 60):
     except Exception:
         return None
 
-
-def should_backup_today() -> bool:
+def should_backup_today():
     today = datetime.now().strftime("%Y%m%d")
     return not any(Path(BACKUP_DIR).glob(f"backup_{today}_*.zip"))
-
 
 # ============================================================
 # HELPERS
 # ============================================================
 def calc_age(bd):
     if not bd: return None
-    try:
-        d = datetime.strptime(bd, "%Y-%m-%d").date()
-    except Exception:
-        return None
+    try: d = datetime.strptime(bd, "%Y-%m-%d").date()
+    except Exception: return None
     t = date.today()
     return t.year - d.year - ((t.month, t.day) < (d.month, d.day))
 
-
 def full_name(m): return f"{m['first_name']} {m['last_name']}"
-
 
 def auto_category(age):
     if age is None: return "Seniors"
@@ -501,18 +352,15 @@ def auto_category(age):
     if age <= 20: return "Espoirs"
     return "Seniors"
 
-
 def slug(s):
     s = re.sub(r"[^a-zA-Z0-9]+", "_", (s or "").strip())
     return s.strip("_") or "sans_nom"
-
 
 def login(u, p):
     user = fetch_one("SELECT * FROM users WHERE username=?", (u,))
     if user and verify_pw(p, user["password"]):
         return user
     return None
-
 
 def compute_payment_status(amount, paid, due_date):
     if paid >= amount: return "paid"
@@ -522,21 +370,17 @@ def compute_payment_status(amount, paid, due_date):
         return "pending"
     return "partial"
 
-
 # ============================================================
-# QR (HMAC sécurisé)
+# QR
 # ============================================================
-def sign_payload(member_id: int) -> str:
+def sign_payload(member_id):
     msg = str(member_id).encode()
     return hmac.new(LICENSE_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
 
+def build_qr_payload(member_id, license_number=""):
+    return f"DOJO|{member_id}|{license_number or ''}|{sign_payload(member_id)}"
 
-def build_qr_payload(member_id: int, license_number: str = "") -> str:
-    sig = sign_payload(member_id)
-    return f"DOJO|{member_id}|{license_number or ''}|{sig}"
-
-
-def verify_qr_payload(payload: str):
+def verify_qr_payload(payload):
     try:
         prefix, mid, lic, sig = payload.split("|")
         if prefix != "DOJO": return None
@@ -545,7 +389,6 @@ def verify_qr_payload(payload: str):
     except Exception:
         return None
 
-
 def make_qr_code(m):
     data = build_qr_payload(m["id"], m.get("license_number") or "")
     img = qrcode.make(data)
@@ -553,11 +396,8 @@ def make_qr_code(m):
     img.save(path)
     return path, data
 
-
-def save_member_photo(member_id: int, uploaded_file):
-    """Enregistre la photo d'un membre, redimensionnée à 400x400 max."""
-    if uploaded_file is None:
-        return None
+def save_member_photo(member_id, uploaded_file):
+    if uploaded_file is None: return None
     try:
         from PIL import Image
         img = Image.open(uploaded_file).convert("RGB")
@@ -568,15 +408,10 @@ def save_member_photo(member_id: int, uploaded_file):
     except Exception:
         return None
 
-
 def get_member_photo(m):
-    if not m:
-        return None
+    if not m: return None
     p = m.get("photo")
-    if p and os.path.exists(p):
-        return p
-    return None
-
+    return p if p and os.path.exists(p) else None
 
 def decode_qr_from_bytes(b):
     if not HAS_CV: return None
@@ -586,18 +421,15 @@ def decode_qr_from_bytes(b):
     data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
     return data or None
 
-
-# ---------- Signature électronique ----------
-def save_signature_to_db(member_id: int, image_data) -> bool:
-    if image_data is None:
-        return False
+# ---------- Signature ----------
+def save_signature_to_db(member_id, image_data):
+    if image_data is None: return False
     try:
         from PIL import Image
         img = Image.fromarray(image_data.astype("uint8"), "RGBA")
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
-        buf = io.BytesIO()
-        bg.save(buf, format="PNG")
+        buf = io.BytesIO(); bg.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode()
         execute("""UPDATE members SET parental_signature=?, signature_date=?
                    WHERE id=?""", (b64, date.today().isoformat(), member_id))
@@ -605,13 +437,10 @@ def save_signature_to_db(member_id: int, image_data) -> bool:
     except Exception:
         return False
 
-
-def render_signature_from_db(member, width=320) -> bool:
-    if not member:
-        return False
+def render_signature_from_db(member, width=320):
+    if not member: return False
     sig = member.get("parental_signature")
-    if not sig:
-        return False
+    if not sig: return False
     try:
         st.image(f"data:image/png;base64,{sig}", width=width,
                  caption=f"Signature parentale — {member.get('signature_date') or ''}")
@@ -619,57 +448,51 @@ def render_signature_from_db(member, width=320) -> bool:
     except Exception:
         return False
 
+def _safe_canvas_image(canvas_result):
+    """Récupère image_data sans planter si rien n'a été dessiné."""
+    if canvas_result is None:
+        return None
+    try:
+        return canvas_result.image_data
+    except Exception:
+        return None
 
-# ---------- Import CSV en masse ----------
-def csv_template_bytes() -> bytes:
-    cols = ["first_name", "last_name", "birth_date", "gender", "phone", "email",
-            "address", "blood_group", "academic_level", "grade", "discipline",
-            "license_number", "notes"]
-    example = [
-        "Yacine", "Benali", "2010-03-15", "M", "0550123456", "yacine@mail.dz",
-        "12 Rue des Oliviers, Tlemcen", "O+", "5e année", "Orange", "Kata",
-        "LIC-2025-001", "",
-    ]
-    df = pd.DataFrame([example], columns=cols)
-    return df.to_csv(index=False).encode("utf-8-sig")
-
+# ---------- Import CSV ----------
+def csv_template_bytes():
+    cols = ["first_name","last_name","birth_date","gender","phone","email",
+            "address","blood_group","academic_level","grade","discipline",
+            "license_number","notes"]
+    example = ["Yacine","Benali","2010-03-15","M","0550123456","yacine@mail.dz",
+               "12 Rue des Oliviers, Tlemcen","O+","5e année","Orange","Kata",
+               "LIC-2025-001",""]
+    return pd.DataFrame([example], columns=cols).to_csv(index=False).encode("utf-8-sig")
 
 def import_members_from_csv(uploaded_file):
     try:
         df = pd.read_csv(uploaded_file, dtype=str).fillna("")
     except Exception as e:
         return 0, [f"Lecture CSV impossible : {e}"]
-
     required = {"first_name", "last_name"}
     missing = required - set(df.columns)
     if missing:
         return 0, [f"Colonnes obligatoires manquantes : {', '.join(missing)}"]
-
-    imported = 0
-    errors = []
+    imported = 0; errors = []
     for i, row in df.iterrows():
         line = i + 2
         fn = str(row.get("first_name", "")).strip()
         ln = str(row.get("last_name", "")).strip()
         if not fn or not ln:
-            errors.append(f"Ligne {line} : prénom/nom manquant")
-            continue
-
+            errors.append(f"Ligne {line} : prénom/nom manquant"); continue
         bd = str(row.get("birth_date", "")).strip()
         if bd:
-            try:
-                datetime.strptime(bd, "%Y-%m-%d")
+            try: datetime.strptime(bd, "%Y-%m-%d")
             except ValueError:
-                errors.append(f"Ligne {line} : date '{bd}' invalide (attendu YYYY-MM-DD)")
-                continue
-
+                errors.append(f"Ligne {line} : date '{bd}' invalide (YYYY-MM-DD)"); continue
         age = calc_age(bd) if bd else None
         cat = auto_category(age)
         grade = str(row.get("grade", "")).strip() or "Blanche"
-        if grade not in GRADES:
-            grade = "Blanche"
+        if grade not in GRADES: grade = "Blanche"
         disc = str(row.get("discipline", "")).strip() or "Kata"
-
         try:
             mid = execute("""INSERT INTO members(
                 first_name,last_name,birth_date,gender,phone,email,address,
@@ -677,74 +500,64 @@ def import_members_from_csv(uploaded_file):
                 license_number,join_date,status,notes)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (fn, ln, bd,
-                 str(row.get("gender", "")).strip() or "M",
-                 str(row.get("phone", "")).strip(),
-                 str(row.get("email", "")).strip(),
-                 str(row.get("address", "")).strip(),
-                 str(row.get("blood_group", "")).strip(),
-                 str(row.get("academic_level", "")).strip(),
+                 str(row.get("gender","")).strip() or "M",
+                 str(row.get("phone","")).strip(),
+                 str(row.get("email","")).strip(),
+                 str(row.get("address","")).strip(),
+                 str(row.get("blood_group","")).strip(),
+                 str(row.get("academic_level","")).strip(),
                  cat, grade, disc,
-                 str(row.get("license_number", "")).strip(),
+                 str(row.get("license_number","")).strip(),
                  date.today().isoformat(), "Actif",
-                 str(row.get("notes", "")).strip()))
+                 str(row.get("notes","")).strip()))
             m = fetch_one("SELECT * FROM members WHERE id=?", (mid,))
             make_qr_code(m)
             imported += 1
         except Exception as e:
             errors.append(f"Ligne {line} : {e}")
-
-    if imported:
-        export_members_csv()
+    if imported: export_members_csv()
     return imported, errors
 
-
 # ============================================================
-# PDF — Fiche membre, Reçu, Carte, Trombinoscope
+# PDF
 # ============================================================
 def _t(s): return str(s if s is not None else "").encode("latin-1", "replace").decode("latin-1")
-
 
 def make_member_pdf(m):
     pdf = FPDF(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, _t("Fiche membre - Dojo Karaté"), ln=True, align="C"); pdf.ln(4)
-    # Photo en haut à droite
     photo = get_member_photo(m)
     if photo:
-        try:
-            pdf.image(photo, x=160, y=20, w=40, h=40)
-        except Exception:
-            pass
+        try: pdf.image(photo, x=160, y=20, w=40, h=40)
+        except Exception: pass
     pdf.set_font("Helvetica", "", 11)
-    for k, v in [
-        ("Nom complet", full_name(m)), ("Âge", calc_age(m["birth_date"])),
-        ("Date naissance", m["birth_date"]), ("Sexe", m["gender"]),
-        ("Catégorie", m["category"]), ("Téléphone", m["phone"]),
-        ("Email", m["email"]), ("Adresse", m["address"]),
-        ("Grade", m["grade"]), ("N° Licence", m["license_number"]),
-        ("Exp. licence", m["license_expiry"]),
-        ("Exp. cert. médical", m["medical_cert_expiry"]),
-        ("Assurance", m["insurance_status"]),
-        ("Date inscription", m["join_date"]), ("Statut", m["status"]),
-        ("Notes", m["notes"])]:
+    for k, v in [("Nom complet", full_name(m)), ("Âge", calc_age(m["birth_date"])),
+                 ("Date naissance", m["birth_date"]), ("Sexe", m["gender"]),
+                 ("Catégorie", m["category"]), ("Téléphone", m["phone"]),
+                 ("Email", m["email"]), ("Adresse", m["address"]),
+                 ("Grade", m["grade"]), ("N° Licence", m["license_number"]),
+                 ("Exp. licence", m["license_expiry"]),
+                 ("Exp. cert. médical", m["medical_cert_expiry"]),
+                 ("Assurance", m["insurance_status"]),
+                 ("Date inscription", m["join_date"]), ("Statut", m["status"]),
+                 ("Notes", m["notes"])]:
         pdf.set_font("Helvetica", "B", 11); pdf.cell(60, 8, _t(f"{k} :"))
         pdf.set_font("Helvetica", "", 11); pdf.cell(0, 8, _t(v), ln=True)
     path = os.path.join(EXPORT_DIR, f"fiche_{slug(full_name(m))}.pdf")
     pdf.output(path); return path
 
-
 def make_receipt_pdf(p, m):
     pdf = FPDF(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, _t("Reçu de paiement - Dojo Karaté"), ln=True, align="C"); pdf.ln(6)
+    pdf.cell(0, 10, _t("Reçu de paiement"), ln=True, align="C"); pdf.ln(6)
     pdf.set_font("Helvetica", "", 12)
     reste = (p["amount"] or 0) - (p.get("amount_paid") or 0)
     for k, v in [("Reçu N°", p["id"]), ("Date", p["payment_date"]),
                  ("Membre", full_name(m)), ("Type", p["type"]),
                  ("Montant total", f"{p['amount']:.2f} DA"),
                  ("Montant payé", f"{p.get('amount_paid', 0):.2f} DA"),
-                 ("Reste dû", f"{reste:.2f} DA"),
-                 ("Méthode", p["method"]),
+                 ("Reste dû", f"{reste:.2f} DA"), ("Méthode", p["method"]),
                  ("Échéance", p["due_date"]), ("Saison", p["season"]),
                  ("Statut", PAYMENT_STATUS.get(p["status"], p["status"])),
                  ("Notes", p["notes"])]:
@@ -755,34 +568,23 @@ def make_receipt_pdf(p, m):
     path = os.path.join(EXPORT_DIR, f"recu_{p['id']}_{slug(full_name(m))}.pdf")
     pdf.output(path); return path
 
-
-CARD_W, CARD_H = 85, 54  # mm
-
+CARD_W, CARD_H = 85, 54
 
 def _draw_card(pdf, x, y, m, qr_path):
     pdf.set_fill_color(255, 255, 255); pdf.set_draw_color(180, 180, 180)
     pdf.rect(x, y, CARD_W, CARD_H, style="DF")
-    # Bandeau titre
-    pdf.set_fill_color(26, 26, 46)
-    pdf.rect(x, y, CARD_W, 10, style="F")
+    pdf.set_fill_color(26, 26, 46); pdf.rect(x, y, CARD_W, 10, style="F")
     pdf.set_text_color(255, 255, 255); pdf.set_font("Helvetica", "B", 10)
-    pdf.set_xy(x + 2, y + 2)
-    pdf.cell(0, 6, _t("DOJO KARATÉ"), ln=0)
+    pdf.set_xy(x + 2, y + 2); pdf.cell(0, 6, _t("DOJO KARATÉ"), ln=0)
     pdf.set_text_color(0, 0, 0)
-    # Photo (18 x 22 mm) à gauche
     photo = get_member_photo(m)
     if photo:
-        try:
-            pdf.image(photo, x + 2, y + 13, 18, 22)
-        except Exception:
-            pass
-    # Bloc texte à droite de la photo
+        try: pdf.image(photo, x + 2, y + 13, 18, 22)
+        except Exception: pass
     txt_x = x + 22
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_xy(txt_x, y + 13)
+    pdf.set_font("Helvetica", "B", 10); pdf.set_xy(txt_x, y + 13)
     pdf.cell(0, 5, _t(f"{m['first_name']} {m['last_name']}"[:22]), ln=1)
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_xy(txt_x, y + 19)
+    pdf.set_font("Helvetica", "", 8); pdf.set_xy(txt_x, y + 19)
     pdf.cell(0, 4, _t(f"Grade : {m.get('grade') or '—'}"[:24]), ln=1)
     pdf.set_xy(txt_x, y + 24)
     pdf.cell(0, 4, _t(f"Lic. : {m.get('license_number') or '—'}"[:24]), ln=1)
@@ -790,96 +592,66 @@ def _draw_card(pdf, x, y, m, qr_path):
     pdf.set_xy(txt_x, y + 29)
     pdf.cell(0, 4, _t(f"ID : {m['id']:06d}"), ln=1)
     pdf.set_text_color(0, 0, 0)
-    # QR en bas à droite
     if qr_path and os.path.exists(qr_path):
         pdf.image(qr_path, x + CARD_W - 26, y + CARD_H - 26, 24, 24)
-    # Pied
     pdf.set_font("Helvetica", "", 6); pdf.set_text_color(120, 120, 120)
     pdf.set_xy(x + 2, y + CARD_H - 6)
     pdf.cell(0, 4, _t(f"Émise le {date.today():%d/%m/%Y}"), ln=1)
     pdf.set_text_color(0, 0, 0)
 
-
 def generate_member_card_pdf(m):
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.add_page()
+    pdf = FPDF(orientation="P", unit="mm", format="A4"); pdf.add_page()
     qr_path, _ = make_qr_code(m)
     _draw_card(pdf, 62, 40, m, qr_path)
     path = os.path.join(EXPORT_DIR, f"carte_{slug(full_name(m))}.pdf")
     pdf.output(path); return path
 
-
 def generate_batch_cards_pdf(members):
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.add_page()
+    pdf = FPDF(orientation="P", unit="mm", format="A4"); pdf.add_page()
     mx, my, gx, gy = 12, 15, 6, 6
-    per_row, per_col = 2, 4
-    per_page = per_row * per_col
+    per_row, per_col = 2, 4; per_page = per_row * per_col
     for i, m in enumerate(members):
         pos = i % per_page
-        if pos == 0 and i > 0:
-            pdf.add_page()
+        if pos == 0 and i > 0: pdf.add_page()
         col, row = pos % per_row, pos // per_row
-        x = mx + col * (CARD_W + gx)
-        y = my + row * (CARD_H + gy)
+        x = mx + col * (CARD_W + gx); y = my + row * (CARD_H + gy)
         qr_path, _ = make_qr_code(m)
         _draw_card(pdf, x, y, m, qr_path)
     path = os.path.join(EXPORT_DIR, f"cartes_lot_{datetime.now():%Y%m%d_%H%M}.pdf")
     pdf.output(path); return path
 
-
 def generate_trombinoscope_pdf(members, title="Trombinoscope"):
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.add_page()
+    pdf = FPDF(orientation="P", unit="mm", format="A4"); pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, _t(title), ln=True, align="C")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 5, _t(f"Effectif : {len(members)} — Édité le {date.today():%d/%m/%Y}"),
              ln=True, align="C")
     pdf.ln(4)
-
-    per_row, per_col = 4, 5
-    per_page = per_row * per_col
-    cell_w, cell_h = 45, 50
-    margin_x, margin_y = 12, 25
-    gap_x, gap_y = 3, 2
-
+    per_row, per_col = 4, 5; per_page = per_row * per_col
+    cell_w, cell_h = 45, 50; margin_x, margin_y = 12, 25; gap_x, gap_y = 3, 2
     for i, m in enumerate(members):
         pos = i % per_page
         if pos == 0 and i > 0:
-            pdf.add_page()
-            margin_y = 15
+            pdf.add_page(); margin_y = 15
         col, row = pos % per_row, pos // per_row
         x = margin_x + col * (cell_w + gap_x)
         y = margin_y + row * (cell_h + gap_y)
-
-        pdf.set_draw_color(200, 200, 200)
-        pdf.set_fill_color(250, 250, 250)
+        pdf.set_draw_color(200, 200, 200); pdf.set_fill_color(250, 250, 250)
         pdf.rect(x, y, cell_w, cell_h, style="DF")
-
         photo = get_member_photo(m)
         if photo:
-            try:
-                pdf.image(photo, x + 2.5, y + 2, 40, 40)
-            except Exception:
-                pass
-
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_text_color(0, 0, 0)
+            try: pdf.image(photo, x + 2.5, y + 2, 40, 40)
+            except Exception: pass
+        pdf.set_font("Helvetica", "B", 8); pdf.set_text_color(0, 0, 0)
         pdf.set_xy(x, y + 43)
-        pdf.cell(cell_w, 4,
-                 _t(f"{m['first_name']} {m['last_name']}"[:24]), align="C")
-
-        pdf.set_font("Helvetica", "I", 7)
-        pdf.set_text_color(90, 90, 90)
+        pdf.cell(cell_w, 4, _t(f"{m['first_name']} {m['last_name']}"[:24]), align="C")
+        pdf.set_font("Helvetica", "I", 7); pdf.set_text_color(90, 90, 90)
         pdf.set_xy(x, y + 46.5)
         pdf.cell(cell_w, 3, _t((m.get("grade") or "—")[:26]), align="C")
         pdf.set_text_color(0, 0, 0)
-
     path = os.path.join(EXPORT_DIR, f"trombinoscope_{datetime.now():%Y%m%d_%H%M}.pdf")
-    pdf.output(path)
-    return path
-
+    pdf.output(path); return path
 
 # ============================================================
 # EXPORTS CSV
@@ -889,9 +661,7 @@ def export_members_csv():
     if not rows: return None
     df = pd.DataFrame(rows); df["age"] = df["birth_date"].apply(calc_age)
     path = os.path.join(EXPORT_DIR, "membres.csv")
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    return path
-
+    df.to_csv(path, index=False, encoding="utf-8-sig"); return path
 
 def export_payments_csv():
     rows = fetch_all("""SELECT p.*, m.first_name, m.last_name FROM payments p
@@ -899,9 +669,7 @@ def export_payments_csv():
     if not rows: return None
     df = pd.DataFrame(rows)
     path = os.path.join(EXPORT_DIR, "paiements.csv")
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    return path
-
+    df.to_csv(path, index=False, encoding="utf-8-sig"); return path
 
 def export_attendance_csv():
     rows = fetch_all("""SELECT a.attendance_date, m.first_name, m.last_name,
@@ -913,14 +681,11 @@ def export_attendance_csv():
     if not rows: return None
     df = pd.DataFrame(rows)
     path = os.path.join(EXPORT_DIR, "presences.csv")
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-    return path
-
+    df.to_csv(path, index=False, encoding="utf-8-sig"); return path
 
 def export_all_csv():
     return [p for p in (export_members_csv(), export_payments_csv(),
                          export_attendance_csv()) if p]
-
 
 # ============================================================
 # INITIALISATION
@@ -930,14 +695,24 @@ init_db()
 if should_backup_today():
     auto_backup(keep_days=60)
 
+# Seed automatique si base vide (utile sur Streamlit Cloud)
+try:
+    _n = fetch_one("SELECT COUNT(*) n FROM members")["n"]
+    if _n == 0:
+        try:
+            import seed_data
+            seed_data.main()
+        except Exception:
+            pass
+except Exception:
+    pass
 
-# ============================================================
-# SESSION
-# ============================================================
 if "user" not in st.session_state:
     st.session_state.user = None
 
-
+# ============================================================
+# LOGIN
+# ============================================================
 def login_page():
     st.markdown(f"<h1 style='text-align:center'>{APP_TITLE}</h1>",
                 unsafe_allow_html=True)
@@ -949,38 +724,32 @@ def login_page():
             if st.form_submit_button("Se connecter", use_container_width=True):
                 user = login(u, p)
                 if user:
-                    st.session_state.user = user
-                    st.rerun()
+                    st.session_state.user = user; st.rerun()
                 else:
                     st.error("Identifiants invalides")
-        st.info("Défaut : *admin / admin123* ou *prof / prof123*")
+        st.info("Défaut : *admin / admin123*")
         st.caption(f"📂 Données : {DATA_DIR}")
 
-
 # ============================================================
-# PAGES
+# PAGE — DASHBOARD
 # ============================================================
 def page_dashboard():
     st.title("📊 Tableau de bord")
     members = fetch_all("SELECT * FROM members")
     active = [m for m in members if m["status"] == "Actif"]
     archived = [m for m in members if m["status"] == "Archivé"]
-
     tp = fetch_one("SELECT COALESCE(SUM(amount_paid),0) s FROM payments WHERE status='paid'")["s"]
     pend = fetch_one("""SELECT COALESCE(SUM(amount - COALESCE(amount_paid,0)),0) s
                         FROM payments WHERE status!='paid'""")["s"]
-
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Membres", len(members))
     c2.metric("Actifs", len(active))
     c3.metric("Archivés", len(archived))
     c4.metric("Encaissé", f"{tp:,.0f} DA")
     c5.metric("En attente", f"{pend:,.0f} DA")
-
     st.divider()
     if members:
-        df = pd.DataFrame(members)
-        df["age"] = df["birth_date"].apply(calc_age)
+        df = pd.DataFrame(members); df["age"] = df["birth_date"].apply(calc_age)
         a, b = st.columns(2)
         cc = df["category"].value_counts().reset_index()
         cc.columns = ["Catégorie", "Nombre"]
@@ -990,12 +759,9 @@ def page_dashboard():
         gc.columns = ["Grade", "Nombre"]
         b.plotly_chart(px.bar(gc, x="Grade", y="Nombre", title="Par grade"),
                        use_container_width=True)
-
     st.divider()
     st.subheader("⚠️ Alertes administratives")
-    today = date.today()
-    alerts = []
-
+    today = date.today(); alerts = []
     for m in active:
         for fld, label in (("license_expiry", "Licence"),
                             ("medical_cert_expiry", "Cert. médical"),
@@ -1007,40 +773,35 @@ def page_dashboard():
                         alerts.append(f"🔴 {label} EXPIRÉ — {full_name(m)} ({d})")
                     elif d < today + timedelta(days=30):
                         alerts.append(f"🟠 {label} bientôt expiré — {full_name(m)} ({d})")
-                except Exception:
-                    pass
+                except Exception: pass
         if m.get("documents_status") == "Incomplet":
             alerts.append(f"🟡 Dossier incomplet — {full_name(m)}")
-
     for p in fetch_all("""SELECT p.*, m.first_name, m.last_name
                           FROM payments p JOIN members m ON m.id=p.member_id
                           WHERE p.status!='paid'"""):
         reste = (p["amount"] or 0) - (p.get("amount_paid") or 0)
         alerts.append(f"💰 Impayé {reste:.0f} DA — {p['first_name']} {p['last_name']}")
-
     for m in active:
-        recent = fetch_all("""SELECT status FROM attendance
-                              WHERE member_id=?
+        recent = fetch_all("""SELECT status FROM attendance WHERE member_id=?
                               ORDER BY attendance_date DESC LIMIT 4""", (m["id"],))
         if len(recent) >= 4 and all(r["status"] == "absent" for r in recent):
             alerts.append(f"🚨 {full_name(m)} : 4 absences consécutives")
-
     if alerts:
-        for a in alerts[:30]:
-            st.warning(a)
-        if len(alerts) > 30:
-            st.caption(f"... et {len(alerts) - 30} autres.")
+        for a in alerts[:30]: st.warning(a)
+        if len(alerts) > 30: st.caption(f"... et {len(alerts) - 30} autres.")
     else:
         st.success("Aucune alerte 🎉")
 
-
+# ============================================================
+# PAGE — MEMBRES
+# ============================================================
 def page_members():
     st.title("👥 Membres")
     t1, t2, t3, t4, t5, t6 = st.tabs(
-        ["📋 Liste", "➕ Ajouter", "✏️ Modifier", "🔍 Détails", "🗄️ Archivés",
-         "📥 Importer CSV"])
+        ["📋 Liste", "➕ Ajouter", "✏️ Modifier", "🔍 Détails",
+         "🗄️ Archivés", "📥 Importer CSV"])
 
-    # --- LISTE ---
+    # LISTE
     with t1:
         rows = fetch_all("SELECT * FROM members WHERE status!='Archivé' ORDER BY last_name, first_name")
         if not rows:
@@ -1062,40 +823,32 @@ def page_members():
             st.download_button("📥 CSV", v.to_csv(index=False).encode("utf-8-sig"),
                                 "membres.csv", "text/csv")
 
-    # --- AJOUTER ---
+    # AJOUTER
     with t2:
-        # Signature électronique (hors form, sinon st_canvas plante)
-        with st.expander("✍️ Signature parentale électronique (mineurs — optionnel)",
+        with st.expander("✍️ Signature parentale électronique (optionnel)",
                          expanded=False):
             if HAS_CANVAS:
-                st.caption("Signez ci-dessous à la souris / au doigt. "
-                           "Signature conservée lors de la validation du formulaire.")
+                st.caption("Signez ci-dessous à la souris / au doigt.")
                 col_sig, col_btn = st.columns([4, 1])
                 with col_sig:
                     canvas_result = st_canvas(
-                        fill_color="rgba(0,0,0,0)",
-                        stroke_width=2.5,
-                        stroke_color="#1a1a2e",
-                        background_color="#ffffff",
-                        height=150, width=500,
-                        drawing_mode="freedraw",
-                        key="add_member_sig_canvas",
-                    )
-                    if canvas_result.image_data is not None:
-                        alpha = canvas_result.image_data[..., 3]
+                        fill_color="rgba(0,0,0,0)", stroke_width=2.5,
+                        stroke_color="#1a1a2e", background_color="#ffffff",
+                        height=150, width=500, drawing_mode="freedraw",
+                        key="add_member_sig_canvas")
+                    img_data = _safe_canvas_image(canvas_result)
+                    if img_data is not None:
+                        alpha = img_data[..., 3]
                         if alpha.max() > 0:
-                            st.session_state["pending_signature"] = canvas_result.image_data
+                            st.session_state["pending_signature"] = img_data
                 with col_btn:
-                    st.write("")
-                    st.write("")
+                    st.write(""); st.write("")
                     if st.button("🗑️ Effacer", key="clear_sig_add"):
-                        st.session_state.pop("pending_signature", None)
-                        st.rerun()
+                        st.session_state.pop("pending_signature", None); st.rerun()
                 if st.session_state.get("pending_signature") is not None:
                     st.success("✓ Signature capturée")
             else:
-                st.warning("`streamlit-drawable-canvas` non installé. "
-                           "→ pip install streamlit-drawable-canvas")
+                st.warning("`streamlit-drawable-canvas` non installé.")
 
         with st.form("add_m"):
             c1, c2, c3 = st.columns(3)
@@ -1104,11 +857,11 @@ def page_members():
             gd = c3.selectbox("Sexe", ["M", "F"])
             c4, c5, c6 = st.columns(3)
             bd = c4.date_input("Naissance", value=date(2010, 1, 1))
-            blood = c5.selectbox("Groupe sanguin", ["", "A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
+            blood = c5.selectbox("Groupe sanguin",
+                                 ["", "A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"])
             academic = c6.text_input("Niveau académique")
             c7, c8 = st.columns(2)
-            ph = c7.text_input("Téléphone")
-            em = c8.text_input("Email")
+            ph = c7.text_input("Téléphone"); em = c8.text_input("Email")
             ad = st.text_input("Adresse")
             c9, c10 = st.columns(2)
             gr = c9.selectbox("Grade", GRADES)
@@ -1121,16 +874,14 @@ def page_members():
             ins = c14.selectbox("Assurance", ["non", "oui"])
             ins_e = c15.date_input("Exp. assurance", value=date.today() + timedelta(days=365))
             parental = st.checkbox("Autorisation parentale (mineur)")
-            photo_file = st.file_uploader("📷 Photo de l'athlète (JPG/PNG)",
+            photo_file = st.file_uploader("📷 Photo de l'athlète",
                                            type=["jpg", "jpeg", "png"])
             nt = st.text_area("Notes")
-
             if st.form_submit_button("Ajouter", use_container_width=True):
                 if not fn or not ln:
                     st.error("Prénom et nom obligatoires.")
                 else:
-                    age = calc_age(bd.isoformat())
-                    cat = auto_category(age)
+                    age = calc_age(bd.isoformat()); cat = auto_category(age)
                     mid = execute("""INSERT INTO members(
                         first_name,last_name,birth_date,gender,phone,email,address,
                         blood_group,academic_level,category,grade,grade_date,
@@ -1154,18 +905,16 @@ def page_members():
                         st.session_state.pop("pending_signature", None)
                     m = fetch_one("SELECT * FROM members WHERE id=?", (mid,))
                     make_qr_code(m); export_members_csv()
-                    sig_txt = " + signature" if sig is not None else ""
-                    st.success(f"Ajouté : {fn} {ln} ({cat}){sig_txt}. QR généré.")
+                    st.success(f"Ajouté : {fn} {ln} ({cat}).")
 
-    # --- MODIFIER ---
+    # MODIFIER
     with t3:
         rows = fetch_all("SELECT * FROM members WHERE status!='Archivé' ORDER BY last_name")
         if not rows:
             st.info("Aucun membre.")
         else:
             opts = {f"{m['id']} — {full_name(m)}": m for m in rows}
-            sel = st.selectbox("Membre", list(opts.keys()))
-            m = opts[sel]
+            sel = st.selectbox("Membre", list(opts.keys())); m = opts[sel]
             with st.form("edit_m"):
                 c1, c2 = st.columns(2)
                 fn = c1.text_input("Prénom", value=m["first_name"])
@@ -1174,15 +923,15 @@ def page_members():
                 gr = c3.selectbox("Grade", GRADES,
                                    index=GRADES.index(m["grade"]) if m["grade"] in GRADES else 0)
                 stt = c4.selectbox("Statut", ["Actif", "Inactif", "Archivé"],
-                                    index=["Actif", "Inactif", "Archivé"].index(m["status"])
-                                    if m["status"] in ["Actif", "Inactif", "Archivé"] else 0)
+                                    index=["Actif","Inactif","Archivé"].index(m["status"])
+                                    if m["status"] in ["Actif","Inactif","Archivé"] else 0)
                 c5, c6 = st.columns(2)
                 ph = c5.text_input("Téléphone", value=m.get("phone") or "")
                 em = c6.text_input("Email", value=m.get("email") or "")
                 ad = st.text_input("Adresse", value=m.get("address") or "")
                 nt = st.text_area("Notes", value=m.get("notes") or "")
                 new_photo = st.file_uploader("📷 Remplacer la photo",
-                                              type=["jpg", "jpeg", "png"],
+                                              type=["jpg","jpeg","png"],
                                               key=f"photo_edit_{m['id']}")
                 a, b, c = st.columns(3)
                 if a.form_submit_button("💾 Enregistrer", use_container_width=True):
@@ -1194,46 +943,34 @@ def page_members():
                         if path:
                             execute("UPDATE members SET photo=? WHERE id=?",
                                     (path, m["id"]))
-                    export_members_csv()
-                    st.success("Mis à jour."); st.rerun()
+                    export_members_csv(); st.success("Mis à jour."); st.rerun()
                 if b.form_submit_button("🗄️ Archiver", use_container_width=True):
                     execute("UPDATE members SET status='Archivé' WHERE id=?", (m["id"],))
                     st.success("Archivé."); st.rerun()
 
-            # Signature électronique — hors form
-            st.divider()
-            st.subheader("✍️ Signature parentale")
+            st.divider(); st.subheader("✍️ Signature parentale")
             current_sig = m.get("parental_signature")
             if current_sig:
                 render_signature_from_db(m)
                 if st.button("🗑️ Supprimer la signature", key=f"del_sig_{m['id']}"):
                     execute("""UPDATE members SET parental_signature=NULL,
                                signature_date=NULL WHERE id=?""", (m["id"],))
-                    st.success("Signature supprimée.")
                     st.rerun()
             elif HAS_CANVAS:
-                st.caption("Aucune signature. Pour en ajouter une, signez ci-dessous :")
+                st.caption("Signez ci-dessous pour ajouter une signature :")
                 canvas_result = st_canvas(
-                    fill_color="rgba(0,0,0,0)",
-                    stroke_width=2.5,
-                    stroke_color="#1a1a2e",
-                    background_color="#ffffff",
-                    height=150, width=500,
-                    drawing_mode="freedraw",
-                    key=f"edit_sig_canvas_{m['id']}",
-                )
-                if canvas_result.image_data is not None:
-                    alpha = canvas_result.image_data[..., 3]
-                    if alpha.max() > 0:
-                        if st.button("💾 Enregistrer la signature",
-                                     key=f"save_sig_{m['id']}", type="primary"):
-                            if save_signature_to_db(m["id"], canvas_result.image_data):
-                                st.success("Signature enregistrée.")
-                                st.rerun()
-            else:
-                st.caption("Installez `streamlit-drawable-canvas` pour activer.")
+                    fill_color="rgba(0,0,0,0)", stroke_width=2.5,
+                    stroke_color="#1a1a2e", background_color="#ffffff",
+                    height=150, width=500, drawing_mode="freedraw",
+                    key=f"edit_sig_canvas_{m['id']}")
+                img_data = _safe_canvas_image(canvas_result)
+                if img_data is not None and img_data[..., 3].max() > 0:
+                    if st.button("💾 Enregistrer la signature",
+                                 key=f"save_sig_{m['id']}", type="primary"):
+                        if save_signature_to_db(m["id"], img_data):
+                            st.success("Signature enregistrée."); st.rerun()
 
-    # --- DÉTAILS ---
+    # DÉTAILS
     with t4:
         rows = fetch_all("SELECT * FROM members WHERE status!='Archivé' ORDER BY last_name")
         if not rows:
@@ -1246,14 +983,11 @@ def page_members():
             c1.metric("Âge", calc_age(m["birth_date"]) or "-")
             c2.metric("Grade", m["grade"] or "-")
             c3.metric("Statut", m["status"] or "-")
-
             col_photo, col_qr, col_act = st.columns([1, 1, 2])
             with col_photo:
                 photo = get_member_photo(m)
-                if photo:
-                    st.image(photo, caption="Photo", width=200)
-                else:
-                    st.info("Pas de photo")
+                if photo: st.image(photo, caption="Photo", width=200)
+                else: st.info("Pas de photo")
             with col_qr:
                 if st.button("🔄 Générer QR", key=f"qr_gen_{m['id']}"):
                     st.session_state[f"qr_show_{m['id']}"] = True
@@ -1270,59 +1004,50 @@ def page_members():
                 if st.session_state.get(f"pdf_show_{m['id']}"):
                     pdf_path = make_member_pdf(m)
                     with open(pdf_path, "rb") as f:
-                        st.download_button("⬇️ Télécharger la fiche", f.read(),
+                        st.download_button("⬇️ Télécharger", f.read(),
                                             os.path.basename(pdf_path), "application/pdf",
                                             key=f"pdf_dl_{m['id']}")
-
             if m.get("parental_signature"):
                 with st.expander("✍️ Signature parentale", expanded=False):
                     render_signature_from_db(m)
-
             st.divider()
-            sub1, sub2, sub3, sub4 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences", "👨‍👩‍👧 Parents"])
+            sub1, sub2, sub3, sub4 = st.tabs(["💰 Paiements", "🥋 Grades",
+                                               "✅ Présences", "👨‍👩‍👧 Parents"])
             with sub1:
                 ps = fetch_all("SELECT * FROM payments WHERE member_id=? ORDER BY payment_date DESC", (m["id"],))
                 if ps:
-                    df = pd.DataFrame(ps)[["payment_date", "amount", "amount_paid", "type", "status"]]
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                else:
-                    st.caption("Aucun paiement.")
+                    st.dataframe(pd.DataFrame(ps)[["payment_date","amount","amount_paid","type","status"]],
+                                 use_container_width=True, hide_index=True)
+                else: st.caption("Aucun.")
             with sub2:
                 gh = fetch_all("SELECT * FROM grades_history WHERE member_id=? ORDER BY grade_date DESC", (m["id"],))
                 if gh:
-                    st.dataframe(pd.DataFrame(gh)[["grade_date", "grade", "examiner", "result"]],
+                    st.dataframe(pd.DataFrame(gh)[["grade_date","grade","examiner","result"]],
                                  use_container_width=True, hide_index=True)
-                else:
-                    st.caption("Aucun grade.")
+                else: st.caption("Aucun.")
             with sub3:
                 at = fetch_all("""SELECT a.attendance_date, c.name AS cours, a.status
-                                  FROM attendance a
-                                  LEFT JOIN courses c ON c.id=a.course_id
-                                  WHERE a.member_id=?
-                                  ORDER BY a.attendance_date DESC LIMIT 50""", (m["id"],))
+                                  FROM attendance a LEFT JOIN courses c ON c.id=a.course_id
+                                  WHERE a.member_id=? ORDER BY a.attendance_date DESC LIMIT 50""",
+                                (m["id"],))
                 if at:
                     df = pd.DataFrame(at)
                     present = (df["status"] == "present").sum()
                     st.metric("Taux présence", f"{present}/{len(df)}")
                     st.dataframe(df, use_container_width=True, hide_index=True)
-                else:
-                    st.caption("Aucune présence.")
+                else: st.caption("Aucune.")
             with sub4:
-                parents = fetch_all("""SELECT p.*, mp.relationship
-                                       FROM parents p
+                parents = fetch_all("""SELECT p.*, mp.relationship FROM parents p
                                        JOIN member_parents mp ON mp.parent_id=p.id
                                        WHERE mp.member_id=?""", (m["id"],))
                 if parents:
                     st.dataframe(pd.DataFrame(parents), use_container_width=True, hide_index=True)
-                else:
-                    st.caption("Aucun parent lié.")
+                else: st.caption("Aucun parent lié.")
                 with st.form("add_parent"):
                     c1, c2 = st.columns(2)
-                    pf = c1.text_input("Prénom parent")
-                    pl = c2.text_input("Nom parent")
+                    pf = c1.text_input("Prénom parent"); pl = c2.text_input("Nom parent")
                     c3, c4 = st.columns(2)
-                    pp = c3.text_input("Téléphone parent")
-                    pe = c4.text_input("Email parent")
+                    pp = c3.text_input("Téléphone parent"); pe = c4.text_input("Email parent")
                     if st.form_submit_button("Ajouter le parent"):
                         pid = execute("INSERT INTO parents(first_name,last_name,phone,email) VALUES(?,?,?,?)",
                                       (pf, pl, pp, pe))
@@ -1330,13 +1055,13 @@ def page_members():
                                 (m["id"], pid))
                         st.success("Parent ajouté."); st.rerun()
 
-    # --- ARCHIVÉS ---
+    # ARCHIVÉS
     with t5:
         arch = fetch_all("SELECT * FROM members WHERE status='Archivé' ORDER BY last_name")
         if not arch:
             st.info("Aucun membre archivé.")
         else:
-            df = pd.DataFrame(arch)[["id", "first_name", "last_name", "grade", "join_date"]]
+            df = pd.DataFrame(arch)[["id","first_name","last_name","grade","join_date"]]
             st.dataframe(df, use_container_width=True, hide_index=True)
             opts = {f"{m['id']} — {full_name(m)}": m for m in arch}
             sel = st.selectbox("Restaurer", list(opts.keys()))
@@ -1344,70 +1069,52 @@ def page_members():
                 execute("UPDATE members SET status='Actif' WHERE id=?", (opts[sel]["id"],))
                 st.success("Restauré."); st.rerun()
 
-    # --- IMPORTER CSV ---
+    # IMPORTER CSV
     with t6:
         st.subheader("📥 Import en masse de membres")
-        st.markdown("""
-        Importez un fichier CSV pour créer plusieurs membres d'un coup.
-        Les colonnes **`first_name`** et **`last_name`** sont obligatoires.
-        La catégorie et la date d'inscription sont calculées automatiquement.
-        """)
-
-        with st.expander("📄 Format attendu (colonnes acceptées)", expanded=False):
+        st.markdown("Colonnes **`first_name`** et **`last_name`** obligatoires.")
+        with st.expander("📄 Format attendu", expanded=False):
             st.code("""first_name,last_name,birth_date,gender,phone,email,address,blood_group,academic_level,grade,discipline,license_number,notes
-Yacine,Benali,2010-03-15,M,0550123456,yacine@mail.dz,"12 Rue des Oliviers, Tlemcen",O+,5e année,Orange,Kata,LIC-2025-001,
-Amine,Cherif,2008-07-22,M,0550234567,amine@mail.dz,"5 Av. Pasteur, Tlemcen",A+,2e AS,Verte,Kumite,LIC-2025-002,Assidu
+Yacine,Benali,2010-03-15,M,0550123456,yacine@mail.dz,"12 Rue...",O+,5e année,Orange,Kata,LIC-2025-001,
 """, language="csv")
-            st.caption("• `birth_date` au format YYYY-MM-DD  •  `grade` doit exister "
-                       "dans la liste officielle (sinon → Blanche)  •  "
-                       "les colonnes manquantes sont laissées vides.")
-
         col_a, col_b = st.columns(2)
         with col_a:
-            st.download_button("⬇️ Télécharger le modèle CSV",
-                                csv_template_bytes(),
+            st.download_button("⬇️ Modèle CSV", csv_template_bytes(),
                                 "modele_import_membres.csv", "text/csv",
                                 use_container_width=True)
         with col_b:
-            if st.button("🔄 Exporter la liste actuelle",
-                         use_container_width=True):
+            if st.button("🔄 Exporter la liste actuelle", use_container_width=True):
                 p = export_members_csv()
                 if p:
                     with open(p, "rb") as f:
                         st.download_button("⬇️ Télécharger", f.read(),
                                             os.path.basename(p), "text/csv",
                                             key="dl_export_members_import")
-
         st.divider()
-        up_csv = st.file_uploader("Fichier CSV à importer",
-                                   type=["csv"], key="csv_import")
+        up_csv = st.file_uploader("Fichier CSV à importer", type=["csv"], key="csv_import")
         if up_csv is not None:
             try:
                 preview = pd.read_csv(up_csv, dtype=str).fillna("").head(5)
-                st.caption("Aperçu des 5 premières lignes :")
-                st.dataframe(preview, use_container_width=True)
+                st.caption("Aperçu :"); st.dataframe(preview, use_container_width=True)
                 up_csv.seek(0)
             except Exception as e:
                 st.error(f"CSV illisible : {e}")
-
-            if st.button("🚀 Lancer l'import", type="primary",
-                         use_container_width=True):
-                with st.spinner("Import en cours..."):
+            if st.button("🚀 Lancer l'import", type="primary", use_container_width=True):
+                with st.spinner("Import..."):
                     n_ok, errs = import_members_from_csv(up_csv)
-                if n_ok:
-                    st.success(f"✅ {n_ok} membre(s) importé(s) avec succès.")
+                if n_ok: st.success(f"✅ {n_ok} membre(s) importé(s).")
                 if errs:
                     with st.expander(f"⚠️ {len(errs)} erreur(s)", expanded=True):
-                        for e in errs[:50]:
-                            st.write(f"• {e}")
+                        for e in errs[:50]: st.write(f"• {e}")
                 st.rerun()
 
-
+# ============================================================
+# PAGE — COURS
+# ============================================================
 def page_courses():
     st.title("📅 Cours et planning")
     t1, t2, t3, t4 = st.tabs(["📅 Planning", "📋 Liste", "👥 Inscriptions",
                               "📸 Photos de classe"])
-
     with t1:
         courses = fetch_all("SELECT * FROM courses WHERE active=1")
         if not courses:
@@ -1415,58 +1122,55 @@ def page_courses():
         else:
             for day_idx, day in enumerate(DAYS):
                 day_courses = [c for c in courses if c.get("day_of_week") == day_idx]
-                if not day_courses:
-                    continue
+                if not day_courses: continue
                 st.subheader(day)
                 for c in sorted(day_courses, key=lambda x: x.get("start_time") or ""):
                     with st.expander(f"🕐 {c['start_time']}–{c['end_time']} — {c['name']}"):
                         st.write(f"*Salle :* {c.get('room') or '—'}")
                         st.write(f"*Coach :* {c.get('teacher') or '—'}")
-                        enrolled = fetch_one("SELECT COUNT(*) n FROM enrollments WHERE course_id=?", (c["id"],))["n"]
+                        enrolled = fetch_one("SELECT COUNT(*) n FROM enrollments WHERE course_id=?",
+                                              (c["id"],))["n"]
                         st.write(f"*Inscrits :* {enrolled}/{c.get('capacity', '—')}")
-
     with t2:
         rows = fetch_all("SELECT * FROM courses ORDER BY day_of_week, start_time")
         if rows:
             df = pd.DataFrame(rows)
-            df["Jour"] = df["day_of_week"].apply(lambda x: DAYS[x] if isinstance(x, int) and 0 <= x < 7 else "—")
-            v = df[["id", "name", "Jour", "start_time", "end_time", "room", "teacher", "category", "capacity", "active"]]
-            v.columns = ["ID", "Nom", "Jour", "Début", "Fin", "Salle", "Prof", "Catégorie", "Capacité", "Actif"]
+            df["Jour"] = df["day_of_week"].apply(
+                lambda x: DAYS[x] if isinstance(x, int) and 0 <= x < 7 else "—")
+            v = df[["id","name","Jour","start_time","end_time","room","teacher",
+                    "category","capacity","active"]]
+            v.columns = ["ID","Nom","Jour","Début","Fin","Salle","Prof",
+                         "Catégorie","Capacité","Actif"]
             st.dataframe(v, use_container_width=True, hide_index=True)
             opts = {f"{c['id']} — {c['name']}": c["id"] for c in rows}
             sel = st.selectbox("Supprimer un cours", ["—"] + list(opts.keys()))
             if sel != "—" and st.button("🗑️ Supprimer"):
                 cid = opts[sel]
-                for q in ("DELETE FROM courses WHERE id=?", "DELETE FROM enrollments WHERE course_id=?",
+                for q in ("DELETE FROM courses WHERE id=?",
+                          "DELETE FROM enrollments WHERE course_id=?",
                           "DELETE FROM attendance WHERE course_id=?"):
                     execute(q, (cid,))
                 st.rerun()
-
-        st.divider()
-        st.subheader("➕ Créer un cours")
+        st.divider(); st.subheader("➕ Créer un cours")
         with st.form("add_c", clear_on_submit=True):
             nm = st.text_input("Nom *")
             c1, c2, c3 = st.columns(3)
             dy = c1.selectbox("Jour", list(enumerate(DAYS)), format_func=lambda x: x[1])
-            stt = c2.text_input("Début", "18:00")
-            en = c3.text_input("Fin", "19:30")
+            stt = c2.text_input("Début", "18:00"); en = c3.text_input("Fin", "19:30")
             c4, c5 = st.columns(2)
-            rm = c4.text_input("Salle")
-            tc = c5.text_input("Prof")
+            rm = c4.text_input("Salle"); tc = c5.text_input("Prof")
             c6, c7, c8 = st.columns(3)
             ct = c6.selectbox("Catégorie", CATEGORIES)
             disc = c7.selectbox("Discipline", ["Kata", "Kumite", "Kata & Kumite"])
             cp = c8.number_input("Capacité", 1, 100, 20)
             if st.form_submit_button("Créer", use_container_width=True):
-                if not nm:
-                    st.error("Nom obligatoire.")
+                if not nm: st.error("Nom obligatoire.")
                 else:
                     execute("""INSERT INTO courses(name,day_of_week,start_time,end_time,
                                room,teacher,category,discipline,capacity,active)
                                VALUES(?,?,?,?,?,?,?,?,?,1)""",
                             (nm, dy[0], stt, en, rm, tc, ct, disc, cp))
                     st.success("Cours créé."); st.rerun()
-
     with t3:
         cs = fetch_all("SELECT * FROM courses WHERE active=1")
         ms = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
@@ -1486,7 +1190,8 @@ def page_courses():
                     except Exception:
                         st.warning("Déjà inscrit.")
             st.divider()
-            enr = fetch_all("""SELECT e.id, c.name AS cours, m.first_name, m.last_name, e.date_enrolled
+            enr = fetch_all("""SELECT e.id, c.name AS cours, m.first_name, m.last_name,
+                                      e.date_enrolled
                                FROM enrollments e
                                JOIN courses c ON c.id=e.course_id
                                JOIN members m ON m.id=e.member_id
@@ -1494,10 +1199,8 @@ def page_courses():
             if enr:
                 df = pd.DataFrame(enr)
                 df["Nom"] = df["first_name"] + " " + df["last_name"]
-                st.dataframe(df[["id", "cours", "Nom", "date_enrolled"]],
+                st.dataframe(df[["id","cours","Nom","date_enrolled"]],
                              use_container_width=True, hide_index=True)
-
-    # --- PHOTOS DE CLASSE ---
     with t4:
         st.subheader("📸 Photos de classe")
         cs = fetch_all("SELECT * FROM courses WHERE active=1 ORDER BY name")
@@ -1507,7 +1210,6 @@ def page_courses():
             copt = {f"{c['id']} — {c['name']}": c for c in cs}
             csel = st.selectbox("Cours", list(copt.keys()), key="photo_cls_sel")
             course = copt[csel]
-
             members = fetch_all("""SELECT m.* FROM members m
                                    JOIN enrollments e ON e.member_id=m.id
                                    WHERE e.course_id=? AND m.status='Actif'
@@ -1516,64 +1218,54 @@ def page_courses():
             if not members:
                 st.info("Aucun membre inscrit à ce cours.")
             else:
-                info1, info2, info3 = st.columns(3)
-                info1.metric("Inscrits", len(members))
-                info2.metric("Prof", course.get("teacher") or "—")
-                info3.metric("Salle", course.get("room") or "—")
-
+                i1, i2, i3 = st.columns(3)
+                i1.metric("Inscrits", len(members))
+                i2.metric("Prof", course.get("teacher") or "—")
+                i3.metric("Salle", course.get("room") or "—")
                 st.divider()
                 cols = st.columns(4)
                 for i, m in enumerate(members):
                     with cols[i % 4]:
                         photo = get_member_photo(m)
-                        if photo:
-                            st.image(photo, use_container_width=True)
+                        if photo: st.image(photo, use_container_width=True)
                         else:
                             st.markdown(
                                 "<div style='height:170px;background:#f0f0f0;"
-                                "display:flex;align-items:center;"
-                                "justify-content:center;border-radius:8px;"
-                                "color:#999;font-size:14px'>Pas de photo</div>",
+                                "display:flex;align-items:center;justify-content:center;"
+                                "border-radius:8px;color:#999'>Pas de photo</div>",
                                 unsafe_allow_html=True)
                         st.markdown(f"**{full_name(m)}**  \n"
                                     f"<small>{m.get('grade') or '—'} · "
                                     f"{m.get('category') or '—'}</small>",
                                     unsafe_allow_html=True)
                         st.write("")
-
                 st.divider()
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("📄 Trombinoscope du cours",
-                                 type="primary", use_container_width=True):
+                    if st.button("📄 Trombinoscope du cours", type="primary",
+                                 use_container_width=True):
                         title = f"Trombinoscope — {course['name']}"
                         path = generate_trombinoscope_pdf(members, title=title)
                         st.session_state["ttb_course_path"] = path
                 with col2:
-                    if st.button("📄 Trombinoscope (tous cours confondus)",
-                                 use_container_width=True):
-                        all_active = fetch_all("""SELECT * FROM members
-                                                   WHERE status='Actif'
-                                                   ORDER BY last_name""")
-                        path = generate_trombinoscope_pdf(
-                            all_active, title="Trombinoscope général")
+                    if st.button("📄 Trombinoscope général", use_container_width=True):
+                        all_active = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
+                        path = generate_trombinoscope_pdf(all_active, title="Trombinoscope général")
                         st.session_state["ttb_course_path"] = path
-
                 if st.session_state.get("ttb_course_path"):
                     p = st.session_state["ttb_course_path"]
                     if os.path.exists(p):
                         with open(p, "rb") as f:
-                            st.download_button("⬇️ Télécharger le PDF",
-                                                f.read(),
-                                                os.path.basename(p),
-                                                "application/pdf",
+                            st.download_button("⬇️ Télécharger le PDF", f.read(),
+                                                os.path.basename(p), "application/pdf",
                                                 use_container_width=True)
 
-
+# ============================================================
+# PAGE — PRÉSENCES
+# ============================================================
 def page_attendance():
     st.title("✅ Présences")
     t1, t2, t3 = st.tabs(["📝 Pointage", "📷 Scan QR", "📊 Statistiques"])
-
     with t1:
         cs = fetch_all("SELECT * FROM courses WHERE active=1")
         if not cs:
@@ -1600,12 +1292,9 @@ def page_attendance():
                         curr = ex.get(m["id"], "present")
                         idx = keys.index(curr) if curr in keys else 0
                         statuses[m["id"]] = st.selectbox(
-                            full_name(m),
-                            keys,
-                            index=idx,
+                            full_name(m), keys, index=idx,
                             format_func=lambda x: ATTENDANCE_STATUS[x],
-                            key=f"att_{m['id']}"
-                        )
+                            key=f"att_{m['id']}")
                     if st.form_submit_button("💾 Enregistrer", use_container_width=True):
                         for mid, stt in statuses.items():
                             execute("""INSERT INTO attendance(member_id,course_id,attendance_date,status)
@@ -1615,9 +1304,7 @@ def page_attendance():
                                     (mid, course["id"], d.isoformat(), stt))
                         export_attendance_csv()
                         st.success("Présences enregistrées.")
-
-                st.divider()
-                st.subheader("🚨 Absences répétées")
+                st.divider(); st.subheader("🚨 Absences répétées")
                 for m in ms:
                     recent = fetch_all("""SELECT status FROM attendance
                                           WHERE member_id=? AND course_id=?
@@ -1625,7 +1312,6 @@ def page_attendance():
                                         (m["id"], course["id"]))
                     if len(recent) >= 4 and all(r["status"] == "absent" for r in recent):
                         st.error(f"⚠️ {full_name(m)} : 4 absences consécutives !")
-
     with t2:
         if not HAS_CV:
             st.warning("OpenCV non installé — scan QR indisponible.")
@@ -1636,19 +1322,16 @@ def page_attendance():
             else:
                 copt = {f"{c['id']} — {c['name']}": c["id"] for c in cs}
                 csel = st.selectbox("Cours", list(copt.keys()), key="qrc")
-                up = st.file_uploader("Photo du QR", type=["png", "jpg", "jpeg"])
+                up = st.file_uploader("Photo du QR", type=["png","jpg","jpeg"])
                 if up:
                     data = decode_qr_from_bytes(up.read())
-                    if not data:
-                        st.error("QR non lisible.")
+                    if not data: st.error("QR non lisible.")
                     else:
                         info = verify_qr_payload(data)
-                        if not info:
-                            st.error("QR invalide ou falsifié.")
+                        if not info: st.error("QR invalide ou falsifié.")
                         else:
                             m = fetch_one("SELECT * FROM members WHERE id=?", (info["member_id"],))
-                            if not m:
-                                st.error("Membre introuvable.")
+                            if not m: st.error("Membre introuvable.")
                             else:
                                 st.write(f"*Membre* : {full_name(m)}")
                                 execute("""INSERT INTO attendance(member_id,course_id,attendance_date,status)
@@ -1658,12 +1341,10 @@ def page_attendance():
                                         (m["id"], copt[csel], date.today().isoformat(), "present"))
                                 export_attendance_csv()
                                 st.success("Présence enregistrée.")
-
     with t3:
         att = fetch_all("""SELECT a.*, m.first_name, m.last_name FROM attendance a
                            JOIN members m ON m.id=a.member_id""")
-        if not att:
-            st.info("Aucune présence.")
+        if not att: st.info("Aucune présence.")
         else:
             df = pd.DataFrame(att)
             df["Nom"] = df["first_name"] + " " + df["last_name"]
@@ -1677,11 +1358,12 @@ def page_attendance():
             stats["Taux"] = (stats["Présents"] / stats["Total"] * 100).round(1).astype(str) + " %"
             st.dataframe(stats, use_container_width=True, hide_index=True)
 
-
+# ============================================================
+# PAGE — PAIEMENTS
+# ============================================================
 def page_payments():
     st.title("💰 Paiements")
     t1, t2, t3, t4 = st.tabs(["📋 Liste", "➕ Enregistrer", "⚠️ Impayés", "📊 Synthèse"])
-
     with t1:
         rows = fetch_all("""SELECT p.*, m.first_name, m.last_name FROM payments p
                             JOIN members m ON m.id=p.member_id
@@ -1692,15 +1374,14 @@ def page_payments():
             df = pd.DataFrame(rows)
             df["Nom"] = df["first_name"] + " " + df["last_name"]
             df["Reste"] = df["amount"] - df["amount_paid"]
-            v = df[["id", "Nom", "amount", "amount_paid", "Reste", "payment_date",
-                    "due_date", "type", "method", "status"]]
-            v.columns = ["ID", "Membre", "Montant", "Payé", "Reste", "Date",
-                         "Échéance", "Type", "Méthode", "Statut"]
+            v = df[["id","Nom","amount","amount_paid","Reste","payment_date",
+                    "due_date","type","method","status"]]
+            v.columns = ["ID","Membre","Montant","Payé","Reste","Date",
+                         "Échéance","Type","Méthode","Statut"]
             st.dataframe(v, use_container_width=True, hide_index=True)
             st.download_button("📥 CSV", v.to_csv(index=False).encode("utf-8-sig"),
                                 "paiements.csv", "text/csv")
-            st.divider()
-            st.subheader("📄 Reçu PDF")
+            st.divider(); st.subheader("📄 Reçu PDF")
             psel = st.selectbox("Paiement",
                                  [f"{r['id']} — {r['first_name']} {r['last_name']} — {r['amount']} DA"
                                   for r in rows])
@@ -1712,7 +1393,6 @@ def page_payments():
                 with open(path, "rb") as f:
                     st.download_button("⬇️ Télécharger", f.read(),
                                         os.path.basename(path), "application/pdf")
-
     with t2:
         ms = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
         if not ms:
@@ -1741,11 +1421,11 @@ def page_payments():
                              mt, ty, se, status, nt))
                     export_payments_csv()
                     st.success(f"Enregistré — {PAYMENT_STATUS[status]}.")
-
     with t3:
         due = fetch_all("""SELECT p.*, m.first_name, m.last_name, m.phone
                            FROM payments p JOIN members m ON m.id=p.member_id
-                           WHERE p.status!='paid' AND (p.due_date IS NULL OR p.due_date<=?)""",
+                           WHERE p.status!='paid'
+                             AND (p.due_date IS NULL OR p.due_date<=?)""",
                         (date.today().isoformat(),))
         if not due:
             st.success("✅ Aucun impayé.")
@@ -1753,37 +1433,36 @@ def page_payments():
             df = pd.DataFrame(due)
             df["Membre"] = df["first_name"] + " " + df["last_name"]
             df["Reste"] = df["amount"] - df["amount_paid"]
-            v = df[["Membre", "phone", "type", "Reste", "due_date", "status"]]
-            v.columns = ["Membre", "Téléphone", "Type", "Reste dû", "Échéance", "Statut"]
+            v = df[["Membre","phone","type","Reste","due_date","status"]]
+            v.columns = ["Membre","Téléphone","Type","Reste dû","Échéance","Statut"]
             st.dataframe(v, use_container_width=True, hide_index=True)
             st.metric("Total impayés", f"{df['Reste'].sum():,.0f} DA")
-
     with t4:
-        rows = fetch_all("SELECT type, status, SUM(amount_paid) AS total, COUNT(*) AS n FROM payments GROUP BY type, status")
-        if not rows:
-            st.info("Aucune donnée.")
+        rows = fetch_all("""SELECT type, status, SUM(amount_paid) AS total, COUNT(*) AS n
+                            FROM payments GROUP BY type, status""")
+        if not rows: st.info("Aucune donnée.")
         else:
             df = pd.DataFrame(rows)
             st.dataframe(df, use_container_width=True, hide_index=True)
             st.plotly_chart(px.bar(df, x="type", y="total", color="status",
                                     barmode="group"), use_container_width=True)
 
-
+# ============================================================
+# PAGE — GRADES
+# ============================================================
 def page_grades():
     st.title("🥋 Grades et examens")
     t1, t2, t3 = st.tabs(["📜 Historique", "🎓 Examens", "➕ Passage"])
-
     with t1:
         rows = fetch_all("""SELECT g.*, m.first_name, m.last_name FROM grades_history g
-                            JOIN members m ON m.id=g.member_id ORDER BY g.grade_date DESC""")
+                            JOIN members m ON m.id=g.member_id
+                            ORDER BY g.grade_date DESC""")
         if rows:
             df = pd.DataFrame(rows)
             df["Nom"] = df["first_name"] + " " + df["last_name"]
-            st.dataframe(df[["grade_date", "Nom", "grade", "examiner", "result"]],
+            st.dataframe(df[["grade_date","Nom","grade","examiner","result"]],
                          use_container_width=True, hide_index=True)
-        else:
-            st.info("Aucun passage.")
-
+        else: st.info("Aucun passage.")
     with t2:
         st.subheader("➕ Créer un examen")
         with st.form("add_exam", clear_on_submit=True):
@@ -1796,18 +1475,15 @@ def page_grades():
             gt = c4.selectbox("Grade visé", GRADES)
             nt = st.text_area("Notes")
             if st.form_submit_button("Créer", use_container_width=True):
-                if not nm:
-                    st.error("Nom obligatoire.")
+                if not nm: st.error("Nom obligatoire.")
                 else:
                     execute("""INSERT INTO exams(name,exam_date,examiner,grade_targeted,location,notes)
                                VALUES(?,?,?,?,?,?)""", (nm, d.isoformat(), ex, gt, lo, nt))
                     st.success("Examen créé.")
-
-        st.divider()
-        st.subheader("📋 Examens et candidats")
+        st.divider(); st.subheader("📋 Examens et candidats")
         exams = fetch_all("SELECT * FROM exams ORDER BY exam_date DESC")
         for e in exams:
-            with st.expander(f"🎓 {e['name']} — {e['exam_date']} ({e.get('location') or '—'})"):
+            with st.expander(f"🎓 {e['name']} — {e['exam_date']}"):
                 cands = fetch_all("""SELECT ec.*, m.first_name, m.last_name
                                      FROM exam_candidates ec
                                      JOIN members m ON m.id=ec.member_id
@@ -1816,9 +1492,10 @@ def page_grades():
                     with st.form(f"cand_{c['id']}"):
                         st.write(f"*{c['first_name']} {c['last_name']}* — visé : {c['grade_targeted']}")
                         c1, c2 = st.columns(2)
-                        score = c1.number_input("Note /20", 0.0, 20.0, value=float(c.get("score") or 0))
-                        res = c2.selectbox("Résultat", ["pending", "admis", "ajourne"],
-                                            index=["pending", "admis", "ajourne"].index(c.get("result") or "pending"))
+                        score = c1.number_input("Note /20", 0.0, 20.0,
+                                                 value=float(c.get("score") or 0))
+                        res = c2.selectbox("Résultat", ["pending","admis","ajourne"],
+                                            index=["pending","admis","ajourne"].index(c.get("result") or "pending"))
                         obs = st.text_area("Observations", value=c.get("observations") or "")
                         if st.form_submit_button("💾 Enregistrer"):
                             execute("UPDATE exam_candidates SET score=?, result=?, observations=? WHERE id=?",
@@ -1828,17 +1505,16 @@ def page_grades():
                                         (c["grade_targeted"], date.today().isoformat(), c["member_id"]))
                                 execute("""INSERT INTO grades_history(member_id,grade,grade_date,
                                            examiner,result,exam_id) VALUES(?,?,?,?,?,?)""",
-                                        (c["member_id"], c["grade_targeted"], date.today().isoformat(),
+                                        (c["member_id"], c["grade_targeted"],
+                                         date.today().isoformat(),
                                          e.get("examiner"), "Réussi", e["id"]))
                             st.success("Enregistré."); st.rerun()
-
                 with st.form(f"add_cand_{e['id']}"):
                     ms = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
                     mopt = {f"{m['id']} — {full_name(m)}": m for m in ms}
                     msel = st.selectbox("Ajouter un candidat", list(mopt.keys()))
                     m = mopt[msel]
-                    gt = st.selectbox("Grade visé",
-                                       GRADES,
+                    gt = st.selectbox("Grade visé", GRADES,
                                        index=min(GRADES.index(m["grade"]) + 1, len(GRADES) - 1)
                                        if m["grade"] in GRADES else 0,
                                        key=f"gt_{e['id']}")
@@ -1849,11 +1525,9 @@ def page_grades():
                             st.success("Candidat ajouté."); st.rerun()
                         except Exception:
                             st.warning("Déjà candidat.")
-
     with t3:
         ms = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
-        if not ms:
-            st.info("Aucun membre actif.")
+        if not ms: st.info("Aucun membre actif.")
         else:
             with st.form("record_grade", clear_on_submit=True):
                 mopt = {f"{m['id']} — {full_name(m)}": m for m in ms}
@@ -1865,7 +1539,7 @@ def page_grades():
                 c1, c2 = st.columns(2)
                 d = c1.date_input("Date", value=date.today())
                 ex = c2.text_input("Examinateur")
-                rs = st.selectbox("Résultat", ["Réussi", "Échoué", "En attente"])
+                rs = st.selectbox("Résultat", ["Réussi","Échoué","En attente"])
                 nt = st.text_area("Notes")
                 if st.form_submit_button("Enregistrer", use_container_width=True):
                     execute("""INSERT INTO grades_history(member_id,grade,grade_date,
@@ -1877,15 +1551,16 @@ def page_grades():
                         export_members_csv()
                     st.success("Enregistré.")
 
-
+# ============================================================
+# PAGE — COMPÉTITIONS
+# ============================================================
 def page_competitions():
     st.title("🏆 Compétitions")
     t1, t2, t3 = st.tabs(["📋 Liste", "➕ Créer", "👥 Inscriptions"])
-
     with t1:
         comps = fetch_all("SELECT * FROM competitions ORDER BY competition_date DESC")
         for c in comps:
-            with st.expander(f"🏆 {c['name']} — {c.get('competition_date')} ({c.get('location') or '—'})"):
+            with st.expander(f"🏆 {c['name']} — {c.get('competition_date')}"):
                 st.write(c.get("description") or "—")
                 regs = fetch_all("""SELECT cr.*, m.first_name, m.last_name
                                     FROM competition_registrations cr
@@ -1894,10 +1569,9 @@ def page_competitions():
                 if regs:
                     df = pd.DataFrame(regs)
                     df["Athlète"] = df["first_name"] + " " + df["last_name"]
-                    st.dataframe(df[["Athlète", "category", "discipline",
-                                     "result", "ranking", "medal"]],
+                    st.dataframe(df[["Athlète","category","discipline",
+                                     "result","ranking","medal"]],
                                  use_container_width=True, hide_index=True)
-
     with t2:
         with st.form("add_cp", clear_on_submit=True):
             nm = st.text_input("Nom *")
@@ -1906,13 +1580,11 @@ def page_competitions():
             lo = c2.text_input("Lieu")
             de = st.text_area("Description")
             if st.form_submit_button("Créer", use_container_width=True):
-                if not nm:
-                    st.error("Nom obligatoire.")
+                if not nm: st.error("Nom obligatoire.")
                 else:
                     execute("INSERT INTO competitions(name,competition_date,location,description) VALUES(?,?,?,?)",
                             (nm, d.isoformat(), lo, de))
                     st.success("Créée.")
-
     with t3:
         cs = fetch_all("SELECT * FROM competitions")
         ms = fetch_all("SELECT * FROM members WHERE status='Actif'")
@@ -1926,7 +1598,7 @@ def page_competitions():
                 msel = st.selectbox("Athlète", list(mopt.keys()))
                 c1, c2 = st.columns(2)
                 cat = c1.text_input("Catégorie")
-                disc = c2.selectbox("Discipline", ["Kata", "Kumite", "Kata & Kumite"])
+                disc = c2.selectbox("Discipline", ["Kata","Kumite","Kata & Kumite"])
                 if st.form_submit_button("Inscrire", use_container_width=True):
                     try:
                         execute("""INSERT INTO competition_registrations
@@ -1935,9 +1607,7 @@ def page_competitions():
                         st.success("Inscrit.")
                     except Exception:
                         st.warning("Déjà inscrit.")
-
-            st.divider()
-            st.subheader("📝 Saisir les résultats")
+            st.divider(); st.subheader("📝 Saisir les résultats")
             comps = fetch_all("SELECT * FROM competitions")
             for c in comps:
                 regs = fetch_all("""SELECT cr.*, m.first_name, m.last_name
@@ -1949,26 +1619,26 @@ def page_competitions():
                         st.write(f"*{r['first_name']} {r['last_name']}* — {c['name']}")
                         c1, c2, c3 = st.columns(3)
                         res = c1.text_input("Résultat", value=r.get("result") or "")
-                        rk = c2.number_input("Classement", 0, 100, value=int(r.get("ranking") or 0))
-                        md = c3.selectbox("Médaille", ["none", "or", "argent", "bronze"],
-                                           index=["none", "or", "argent", "bronze"].index(r.get("medal") or "none"))
+                        rk = c2.number_input("Classement", 0, 100,
+                                              value=int(r.get("ranking") or 0))
+                        md = c3.selectbox("Médaille", ["none","or","argent","bronze"],
+                                           index=["none","or","argent","bronze"].index(r.get("medal") or "none"))
                         if st.form_submit_button("💾 Enregistrer"):
                             execute("""UPDATE competition_registrations
                                        SET result=?, ranking=?, medal=? WHERE id=?""",
                                     (res, rk, md, r["id"]))
                             st.success("Enregistré."); st.rerun()
 
-
+# ============================================================
+# PAGE — QR & CARTES
+# ============================================================
 def page_qr_cards():
     st.title("📱 QR codes et cartes")
     ms = fetch_all("SELECT * FROM members WHERE status='Actif' ORDER BY last_name")
     if not ms:
-        st.info("Aucun membre actif.")
-        return
-
+        st.info("Aucun membre actif."); return
     t1, t2, t3, t4 = st.tabs(["🪪 Carte individuelle", "📚 Cartes en lot",
                               "🔗 QR seuls", "🖼️ Trombinoscope"])
-
     with t1:
         opts = {f"{m['id']} — {full_name(m)}": m for m in ms}
         m = opts[st.selectbox("Membre", list(opts.keys()))]
@@ -1977,7 +1647,6 @@ def page_qr_cards():
             with open(path, "rb") as f:
                 st.download_button("⬇️ Télécharger", f.read(),
                                     os.path.basename(path), "application/pdf")
-
     with t2:
         grades = sorted({m.get("grade") or "—" for m in ms})
         sel = st.multiselect("Filtrer par grade", grades, default=grades)
@@ -1988,67 +1657,51 @@ def page_qr_cards():
             with open(path, "rb") as f:
                 st.download_button("⬇️ Télécharger", f.read(),
                                     os.path.basename(path), "application/pdf")
-
     with t3:
         if st.button("🔄 Générer tous les QR", type="primary"):
             st.session_state["qr_all_shown"] = True
         if st.session_state.get("qr_all_shown"):
             cols = st.columns(4)
             for i, m in enumerate(ms):
-                path, data = make_qr_code(m)
+                path, _ = make_qr_code(m)
                 with cols[i % 4]:
                     st.image(path, caption=full_name(m), width=150)
                     with open(path, "rb") as f:
                         st.download_button("⬇️", f.read(),
                                             os.path.basename(path), "image/png",
                                             key=f"dl_{m['id']}")
-
     with t4:
         st.subheader("🖼️ Trombinoscope général")
-        st.caption("Génère un PDF A4 avec 20 photos par page (grille 4×5).")
-
         cats = sorted({m.get("category") or "—" for m in ms})
-        sel_cats = st.multiselect("Filtrer par catégorie", cats, default=cats)
+        sel_cats = st.multiselect("Catégories", cats, default=cats)
         filtered = [m for m in ms if (m.get("category") or "—") in sel_cats]
-
         grades = sorted({m.get("grade") or "—" for m in filtered})
-        sel_grades = st.multiselect("Filtrer par grade", grades, default=grades)
+        sel_grades = st.multiselect("Grades", grades, default=grades)
         filtered = [m for m in filtered if (m.get("grade") or "—") in sel_grades]
-
-        st.caption(f"**{len(filtered)} membre(s)** seront inclus "
-                   f"({(len(filtered) - 1) // 20 + 1 if filtered else 0} page(s)).")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🖼️ Générer le trombinoscope", type="primary",
-                         use_container_width=True, disabled=not filtered):
-                path = generate_trombinoscope_pdf(
-                    filtered, title="Trombinoscope général")
-                st.session_state["ttb_general_path"] = path
-        with col2:
-            if st.button("🔄 Régénérer depuis zéro", use_container_width=True):
-                st.session_state.pop("ttb_general_path", None)
-                st.rerun()
-
+        st.caption(f"**{len(filtered)} membre(s)** seront inclus.")
+        if st.button("🖼️ Générer", type="primary",
+                     use_container_width=True, disabled=not filtered):
+            path = generate_trombinoscope_pdf(filtered, title="Trombinoscope général")
+            st.session_state["ttb_general_path"] = path
         if st.session_state.get("ttb_general_path"):
             p = st.session_state["ttb_general_path"]
             if os.path.exists(p):
                 with open(p, "rb") as f:
-                    st.download_button("⬇️ Télécharger le trombinoscope",
-                                        f.read(), os.path.basename(p),
-                                        "application/pdf",
+                    st.download_button("⬇️ Télécharger", f.read(),
+                                        os.path.basename(p), "application/pdf",
                                         use_container_width=True)
 
-
+# ============================================================
+# PAGE — ADMIN
+# ============================================================
 def page_admin():
     st.title("⚙️ Administration")
-    t1, t2, t3, t4 = st.tabs(["👤 Utilisateurs", "💾 Sauvegarde", "📤 Exports", "🗄️ Maintenance"])
-
+    t1, t2, t3, t4, t5 = st.tabs(["👤 Utilisateurs", "💾 Sauvegarde",
+                                   "📤 Exports", "🗄️ Maintenance", "🎲 Données démo"])
     with t1:
         us = fetch_all("SELECT id,username,role,member_id FROM users ORDER BY username")
         st.dataframe(pd.DataFrame(us), use_container_width=True, hide_index=True)
-        st.divider()
-        st.subheader("➕ Ajouter")
+        st.divider(); st.subheader("➕ Ajouter")
         ms = fetch_all("SELECT * FROM members ORDER BY last_name")
         mopt = {"—": None}
         mopt.update({f"{m['id']} — {full_name(m)}": m["id"] for m in ms})
@@ -2067,15 +1720,13 @@ def page_admin():
                         st.success("Créé."); st.rerun()
                     except Exception:
                         st.error("Identifiant existant.")
-        st.divider()
-        st.subheader("🗑️ Supprimer")
+        st.divider(); st.subheader("🗑️ Supprimer")
         dopts = {f"{x['id']} — {x['username']} ({x['role']})": x["id"]
                  for x in us if x["username"] != "admin"}
         if dopts:
             sel = st.selectbox("Utilisateur", list(dopts.keys()))
             if st.button("Supprimer"):
                 execute("DELETE FROM users WHERE id=?", (dopts[sel],)); st.rerun()
-
     with t2:
         st.subheader("💾 Sauvegarde manuelle")
         if st.button("Sauvegarder maintenant"):
@@ -2085,8 +1736,7 @@ def page_admin():
                 with open(path, "rb") as f:
                     st.download_button("⬇️ Télécharger", f.read(),
                                         os.path.basename(path), "application/zip")
-        st.divider()
-        st.subheader("📂 Sauvegardes existantes")
+        st.divider(); st.subheader("📂 Sauvegardes existantes")
         files = sorted(Path(BACKUP_DIR).glob("backup_*.zip"), reverse=True)
         if files:
             for f in files[:30]:
@@ -2095,144 +1745,138 @@ def page_admin():
                 c1.write(f"*{f.name}* — {size_kb:.1f} Ko")
                 with open(f, "rb") as fh:
                     c2.download_button("⬇️", fh.read(), f.name, key=f"b_{f.name}")
-        else:
-            st.caption("Aucune sauvegarde.")
-
-        st.divider()
-        st.subheader("♻️ Restauration")
-        st.info("Pour restaurer : décompressez un ZIP, copiez dojo.db dans "
-                f"{DATA_DIR}, puis relancez l'application.")
-
+        else: st.caption("Aucune sauvegarde.")
     with t3:
         st.subheader("📤 Exports CSV")
         if st.button("🔄 Régénérer tous les CSV"):
             paths = export_all_csv()
             st.success(f"{len(paths)} fichier(s) régénéré(s).")
-        for label, fn in (("Membres", "membres.csv"),
-                           ("Paiements", "paiements.csv"),
-                           ("Présences", "presences.csv")):
+        for label, fn in (("Membres","membres.csv"),("Paiements","paiements.csv"),
+                           ("Présences","presences.csv")):
             p = os.path.join(EXPORT_DIR, fn)
             if os.path.exists(p):
                 with open(p, "rb") as f:
                     st.download_button(f"⬇️ {label} ({fn})", f.read(), fn, "text/csv")
-
     with t4:
         st.subheader("🗄️ Zone technique")
-        st.write(f"*Base de données* : {DB_PATH}")
-        st.write(f"*Dossier exports* : {EXPORT_DIR}")
-        st.write(f"*Dossier QR* : {QR_DIR}")
-        st.write(f"*Dossier photos* : {PHOTO_DIR}")
-        st.write(f"*Dossier backups* : {BACKUP_DIR}")
+        st.write(f"*Base* : {DB_PATH}")
+        st.write(f"*Exports* : {EXPORT_DIR}")
+        st.write(f"*QR* : {QR_DIR}")
+        st.write(f"*Photos* : {PHOTO_DIR}")
+        st.write(f"*Backups* : {BACKUP_DIR}")
         st.write(f"*Machine ID* : {machine_id()}")
         st.divider()
         if os.path.exists(DB_PATH):
             with open(DB_PATH, "rb") as f:
                 st.download_button("⬇️ Télécharger dojo.db", f.read(),
                                     "dojo.db", "application/octet-stream")
+    with t5:
+        st.subheader("🎲 Charger les données de démonstration")
+        st.warning("⚠️ Cette action **efface toute la base actuelle** et la remplace "
+                   "par les données de démo (21 membres, 7 cours, paiements, etc.).")
+        st.caption("Utile si vous êtes sur Streamlit Cloud et que la base est vide.")
+        confirm = st.checkbox("Je comprends que cela va effacer mes données actuelles")
+        if st.button("🚀 Charger les données de démo", type="primary",
+                     disabled=not confirm):
+            try:
+                import importlib
+                import seed_data
+                importlib.reload(seed_data)
+                # Supprime la base et régénère
+                if os.path.exists(DB_PATH):
+                    os.remove(DB_PATH)
+                seed_data.main()
+                st.success("✅ Données de démo chargées ! Reconnectez-vous.")
+                st.session_state.user = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Erreur : {e}")
 
-
+# ============================================================
+# PAGE — MON ESPACE
+# ============================================================
 def page_my_space():
     st.title("🏠 Mon espace")
     mid = st.session_state.user.get("member_id")
     if not mid:
-        st.warning("Aucun profil membre lié à ce compte.")
-        return
+        st.warning("Aucun profil membre lié à ce compte."); return
     m = fetch_one("SELECT * FROM members WHERE id=?", (mid,))
     if not m:
-        st.error("Profil introuvable.")
-        return
+        st.error("Profil introuvable."); return
     st.subheader(full_name(m))
     c1, c2, c3 = st.columns(3)
     c1.metric("Âge", calc_age(m["birth_date"]) or "-")
     c2.metric("Grade", m["grade"] or "-")
     c3.metric("Statut", m["status"])
-
     cph, cqr = st.columns(2)
     with cph:
         photo = get_member_photo(m)
-        if photo:
-            st.image(photo, width=180, caption="Ma photo")
+        if photo: st.image(photo, width=180, caption="Ma photo")
     with cqr:
         if st.button("🔄 Afficher mon QR"):
             st.session_state["myspace_qr"] = True
         if st.session_state.get("myspace_qr"):
             qr_path, _ = make_qr_code(m)
             st.image(qr_path, width=180, caption="Mon QR")
-
     st.divider()
     sub1, sub2, sub3 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences"])
     with sub1:
         ps = fetch_all("SELECT * FROM payments WHERE member_id=? ORDER BY payment_date DESC", (mid,))
         if ps:
-            st.dataframe(pd.DataFrame(ps)[["payment_date", "amount", "amount_paid", "type", "status"]],
+            st.dataframe(pd.DataFrame(ps)[["payment_date","amount","amount_paid","type","status"]],
                          use_container_width=True, hide_index=True)
-        else:
-            st.caption("Aucun.")
+        else: st.caption("Aucun.")
     with sub2:
         gh = fetch_all("SELECT * FROM grades_history WHERE member_id=? ORDER BY grade_date DESC", (mid,))
         if gh:
-            st.dataframe(pd.DataFrame(gh)[["grade_date", "grade", "result"]],
+            st.dataframe(pd.DataFrame(gh)[["grade_date","grade","result"]],
                          use_container_width=True, hide_index=True)
-        else:
-            st.caption("Aucun.")
+        else: st.caption("Aucun.")
     with sub3:
         at = fetch_all("""SELECT a.attendance_date, c.name AS cours, a.status
-                          FROM attendance a
-                          LEFT JOIN courses c ON c.id=a.course_id
-                          WHERE a.member_id=?
-                          ORDER BY a.attendance_date DESC LIMIT 30""", (mid,))
+                          FROM attendance a LEFT JOIN courses c ON c.id=a.course_id
+                          WHERE a.member_id=? ORDER BY a.attendance_date DESC LIMIT 30""",
+                        (mid,))
         if at:
             st.dataframe(pd.DataFrame(at), use_container_width=True, hide_index=True)
-        else:
-            st.caption("Aucune.")
+        else: st.caption("Aucune.")
 
-
+# ============================================================
+# PAGE — INSTALL
+# ============================================================
 def page_install():
     st.title("🛠️ Installation & Déploiement")
     st.markdown(f"**Dossier de données** : `{DATA_DIR}`")
     st.info(f"**Machine ID** : `{machine_id()}`")
-
     env = "🟢 Termux (Android)" if is_termux() else (
-          "🟢 Linux/macOS" if platform.system() in ("Linux", "Darwin") else "🟢 Windows")
+          "🟢 Linux/macOS" if platform.system() in ("Linux","Darwin") else "🟢 Windows")
     st.write(f"**Environnement** : {env}")
-
     tab_pc, tab_cloud, tab_termux, tab_bash = st.tabs(
         ["💻 PC", "☁️ Cloud", "📱 Termux", "📜 Script bash"])
-
     with tab_pc:
         st.code("""mkdir dojo && cd dojo
-# Y placer main.py et requirements.txt
 python -m venv venv
-# Linux/Mac :
-source venv/bin/activate
-# Windows :
-venv\\Scripts\\activate
+source venv/bin/activate  # Windows : venv\\Scripts\\activate
 pip install -r requirements.txt
-streamlit run main.py
-""", language="bash")
-
+streamlit run main.py""", language="bash")
     with tab_cloud:
         st.markdown("""
-        1. Repo GitHub public avec main.py et requirements.txt.
+        1. Repo GitHub public avec `main.py`, `seed_data.py`, `requirements.txt`.
         2. https://share.streamlit.io → New app → choisir le repo.
-        3. Main file : main.py. Deploy.
+        3. Main file : `main.py`. Deploy.
 
         ⚠️ Sur Streamlit Cloud, la base SQLite est **éphémère**.
-        Pour un usage réel, hébergez sur un VPS ou en local.
+        Utilisez **Administration → 🎲 Données démo** après chaque redéploiement.
         """)
-
     with tab_termux:
         st.code("""mkdir -p ~/dojo && cd ~/dojo
-# Y placer main.py + requirements.txt
 python main.py --install-termux
-python main.py --run
-""", language="bash")
+python main.py --run""", language="bash")
         if is_termux():
-            if st.button("🚀 Lancer l'installation automatique", type="primary"):
+            if st.button("🚀 Lancer l'installation", type="primary"):
                 with st.spinner("Installation..."):
                     ok = run_termux_setup()
                 st.success("✅ Terminé.") if ok else st.error("❌ Échec.")
-
     with tab_bash:
         st.code(TERMUX_BASH_SETUP, language="bash")
         st.download_button("⬇️ Télécharger install_dojo.sh",
@@ -2240,18 +1884,14 @@ python main.py --run
                             file_name="install_dojo.sh",
                             mime="text/x-shellscript")
 
-
 # ============================================================
 # ROUTAGE
 # ============================================================
 if st.session_state.user is None:
-    login_page()
-    st.stop()
+    login_page(); st.stop()
 
 user = st.session_state.user
-
-if not license_gate():
-    st.stop()
+if not license_gate(): st.stop()
 
 st.sidebar.markdown(f"### 👤 {user['username']}")
 st.sidebar.caption(f"Rôle : {user['role']}")
@@ -2268,8 +1908,7 @@ elif user["role"] == "membre":
 
 page = st.sidebar.radio("Navigation", menu)
 if st.sidebar.button("🚪 Déconnexion", use_container_width=True):
-    st.session_state.user = None
-    st.rerun()
+    st.session_state.user = None; st.rerun()
 
 if page == "📊 Tableau de bord": page_dashboard()
 elif page == "👥 Membres": page_members()
