@@ -107,8 +107,8 @@ def age_of(bd_iso):
     return t.year - d.year - ((t.month, t.day) < (d.month, d.day))
 
 
-def main():
-    reset = "--reset" in sys.argv
+def main(force=False):
+    reset = "--reset" in sys.argv or force
     if os.path.exists(DB_PATH) and not reset:
         print(f"⚠️  Base existante : {DB_PATH}")
         print("   Relancez avec --reset pour regénérer.")
