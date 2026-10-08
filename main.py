@@ -1791,7 +1791,7 @@ def page_admin():
                 # Supprime la base et régénère
                 if os.path.exists(DB_PATH):
                     os.remove(DB_PATH)
-                seed_data.main()
+                seed_data.main(force=True)
                 st.success("✅ Données de démo chargées ! Reconnectez-vous.")
                 st.session_state.user = None
                 st.rerun()
