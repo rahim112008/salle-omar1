@@ -5,13 +5,16 @@
 Fonctionnalités :
   - Authentification sécurisée (bcrypt) + rôles (admin / prof / secrétaire / membre)
   - Licence hors ligne (HMAC signé sur machine_id)
-  - Membres : archivage, historique, parents, mineurs, dossier médical
-  - Cours + planning hebdo/mensuel + séances exceptionnelles
+  - Membres : archivage, historique, parents, mineurs, dossier médical, photo, signature
+  - Cours + planning hebdo/mensuel + séances exceptionnelles + photos de classe
   - Présences : présent / absent / justifié / retard / consultation + scan QR
   - Paiements : payé / partiel / en retard + reçus PDF + "qui doit payer"
   - Grades & Examens : jury, notes, admis/ajourné + historique
   - Compétitions : catégories, résultats, médailles
   - QR codes sécurisés (HMAC) + cartes membres PDF (individuel + lot)
+  - Trombinoscope PDF (individuel, par cours, général)
+  - Signature électronique parentale (canvas)
+  - Import CSV en masse de membres
   - Sauvegarde automatique quotidienne (ZIP) + restauration manuelle
   - Export CSV de toutes les données
 
@@ -61,6 +64,7 @@ echo "▶ Création du dossier de stockage local..."
 mkdir -p /storage/emulated/0/DojoKaraté/exports
 mkdir -p /storage/emulated/0/DojoKaraté/qrcodes
 mkdir -p /storage/emulated/0/DojoKaraté/backups
+mkdir -p /storage/emulated/0/DojoKaraté/photos
 
 if ! grep -q "DOJO_DATA_DIR" ~/.bashrc 2>/dev/null; then
     echo 'export DOJO_DATA_DIR=/storage/emulated/0/DojoKaraté' >> ~/.bashrc
@@ -113,7 +117,6 @@ if __name__ == "__main__" and len(sys.argv) > 1:
         print(__doc__)
         sys.exit(0)
     elif _arg == "--machine-id":
-        # Utile pour générer une licence client
         parts = [platform.node(), platform.machine(), str(uuid.getnode())]
         raw = "|".join(parts).encode()
         print(hashlib.sha256(raw).hexdigest()[:16])
@@ -135,6 +138,12 @@ try:
 except Exception:
     HAS_CV = False
 
+try:
+    from streamlit_drawable_canvas import st_canvas
+    HAS_CANVAS = True
+except Exception:
+    HAS_CANVAS = False
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -146,10 +155,11 @@ DATA_DIR = os.environ.get("DOJO_DATA_DIR",
 EXPORT_DIR = os.path.join(DATA_DIR, "exports")
 QR_DIR     = os.path.join(DATA_DIR, "qrcodes")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+PHOTO_DIR  = os.path.join(DATA_DIR, "photos")
 DB_PATH    = os.path.join(DATA_DIR, "dojo.db")
 LICENSE_FILE = os.path.join(DATA_DIR, "license.key")
 
-for d in (DATA_DIR, EXPORT_DIR, QR_DIR, BACKUP_DIR):
+for d in (DATA_DIR, EXPORT_DIR, QR_DIR, BACKUP_DIR, PHOTO_DIR):
     os.makedirs(d, exist_ok=True)
 
 APP_TITLE = "🥋 Gestion Dojo Karaté"
@@ -236,7 +246,6 @@ def verify_license(path: str = LICENSE_FILE):
 
 
 def license_gate():
-    """Écran de blocage si licence absente/invalide."""
     ok, msg = verify_license()
     if ok:
         return True
@@ -306,7 +315,8 @@ def init_db():
         discipline TEXT,
         join_date TEXT,
         status TEXT DEFAULT 'Actif',
-        notes TEXT
+        notes TEXT,
+        photo TEXT
     );
     CREATE TABLE IF NOT EXISTS parents(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -400,6 +410,16 @@ def init_db():
     """)
     conn.commit()
 
+    # Migrations : colonnes ajoutées après coup
+    for col, sqltype in (("photo", "TEXT"),
+                         ("parental_signature", "TEXT"),
+                         ("signature_date", "TEXT")):
+        try:
+            c.execute(f"ALTER TABLE members ADD COLUMN {col} {sqltype}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # colonne déjà présente
+
     # Création admin par défaut si base vide
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
@@ -483,7 +503,6 @@ def auto_category(age):
 
 
 def slug(s):
-    """Nettoie une chaîne pour l'utiliser dans un nom de fichier."""
     s = re.sub(r"[^a-zA-Z0-9]+", "_", (s or "").strip())
     return s.strip("_") or "sans_nom"
 
@@ -535,6 +554,30 @@ def make_qr_code(m):
     return path, data
 
 
+def save_member_photo(member_id: int, uploaded_file):
+    """Enregistre la photo d'un membre, redimensionnée à 400x400 max."""
+    if uploaded_file is None:
+        return None
+    try:
+        from PIL import Image
+        img = Image.open(uploaded_file).convert("RGB")
+        img.thumbnail((400, 400))
+        path = os.path.join(PHOTO_DIR, f"member_{member_id}.jpg")
+        img.save(path, "JPEG", quality=85)
+        return path
+    except Exception:
+        return None
+
+
+def get_member_photo(m):
+    if not m:
+        return None
+    p = m.get("photo")
+    if p and os.path.exists(p):
+        return p
+    return None
+
+
 def decode_qr_from_bytes(b):
     if not HAS_CV: return None
     arr = np.frombuffer(b, np.uint8)
@@ -544,8 +587,119 @@ def decode_qr_from_bytes(b):
     return data or None
 
 
+# ---------- Signature électronique ----------
+def save_signature_to_db(member_id: int, image_data) -> bool:
+    if image_data is None:
+        return False
+    try:
+        from PIL import Image
+        img = Image.fromarray(image_data.astype("uint8"), "RGBA")
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        buf = io.BytesIO()
+        bg.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        execute("""UPDATE members SET parental_signature=?, signature_date=?
+                   WHERE id=?""", (b64, date.today().isoformat(), member_id))
+        return True
+    except Exception:
+        return False
+
+
+def render_signature_from_db(member, width=320) -> bool:
+    if not member:
+        return False
+    sig = member.get("parental_signature")
+    if not sig:
+        return False
+    try:
+        st.image(f"data:image/png;base64,{sig}", width=width,
+                 caption=f"Signature parentale — {member.get('signature_date') or ''}")
+        return True
+    except Exception:
+        return False
+
+
+# ---------- Import CSV en masse ----------
+def csv_template_bytes() -> bytes:
+    cols = ["first_name", "last_name", "birth_date", "gender", "phone", "email",
+            "address", "blood_group", "academic_level", "grade", "discipline",
+            "license_number", "notes"]
+    example = [
+        "Yacine", "Benali", "2010-03-15", "M", "0550123456", "yacine@mail.dz",
+        "12 Rue des Oliviers, Tlemcen", "O+", "5e année", "Orange", "Kata",
+        "LIC-2025-001", "",
+    ]
+    df = pd.DataFrame([example], columns=cols)
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def import_members_from_csv(uploaded_file):
+    try:
+        df = pd.read_csv(uploaded_file, dtype=str).fillna("")
+    except Exception as e:
+        return 0, [f"Lecture CSV impossible : {e}"]
+
+    required = {"first_name", "last_name"}
+    missing = required - set(df.columns)
+    if missing:
+        return 0, [f"Colonnes obligatoires manquantes : {', '.join(missing)}"]
+
+    imported = 0
+    errors = []
+    for i, row in df.iterrows():
+        line = i + 2
+        fn = str(row.get("first_name", "")).strip()
+        ln = str(row.get("last_name", "")).strip()
+        if not fn or not ln:
+            errors.append(f"Ligne {line} : prénom/nom manquant")
+            continue
+
+        bd = str(row.get("birth_date", "")).strip()
+        if bd:
+            try:
+                datetime.strptime(bd, "%Y-%m-%d")
+            except ValueError:
+                errors.append(f"Ligne {line} : date '{bd}' invalide (attendu YYYY-MM-DD)")
+                continue
+
+        age = calc_age(bd) if bd else None
+        cat = auto_category(age)
+        grade = str(row.get("grade", "")).strip() or "Blanche"
+        if grade not in GRADES:
+            grade = "Blanche"
+        disc = str(row.get("discipline", "")).strip() or "Kata"
+
+        try:
+            mid = execute("""INSERT INTO members(
+                first_name,last_name,birth_date,gender,phone,email,address,
+                blood_group,academic_level,category,grade,discipline,
+                license_number,join_date,status,notes)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (fn, ln, bd,
+                 str(row.get("gender", "")).strip() or "M",
+                 str(row.get("phone", "")).strip(),
+                 str(row.get("email", "")).strip(),
+                 str(row.get("address", "")).strip(),
+                 str(row.get("blood_group", "")).strip(),
+                 str(row.get("academic_level", "")).strip(),
+                 cat, grade, disc,
+                 str(row.get("license_number", "")).strip(),
+                 date.today().isoformat(), "Actif",
+                 str(row.get("notes", "")).strip()))
+            m = fetch_one("SELECT * FROM members WHERE id=?", (mid,))
+            make_qr_code(m)
+            imported += 1
+        except Exception as e:
+            errors.append(f"Ligne {line} : {e}")
+
+    if imported:
+        export_members_csv()
+    return imported, errors
+
+
 # ============================================================
-# PDF — Fiche membre, Reçu, Carte
+# PDF — Fiche membre, Reçu, Carte, Trombinoscope
 # ============================================================
 def _t(s): return str(s if s is not None else "").encode("latin-1", "replace").decode("latin-1")
 
@@ -554,6 +708,13 @@ def make_member_pdf(m):
     pdf = FPDF(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, _t("Fiche membre - Dojo Karaté"), ln=True, align="C"); pdf.ln(4)
+    # Photo en haut à droite
+    photo = get_member_photo(m)
+    if photo:
+        try:
+            pdf.image(photo, x=160, y=20, w=40, h=40)
+        except Exception:
+            pass
     pdf.set_font("Helvetica", "", 11)
     for k, v in [
         ("Nom complet", full_name(m)), ("Âge", calc_age(m["birth_date"])),
@@ -601,23 +762,38 @@ CARD_W, CARD_H = 85, 54  # mm
 def _draw_card(pdf, x, y, m, qr_path):
     pdf.set_fill_color(255, 255, 255); pdf.set_draw_color(180, 180, 180)
     pdf.rect(x, y, CARD_W, CARD_H, style="DF")
+    # Bandeau titre
     pdf.set_fill_color(26, 26, 46)
     pdf.rect(x, y, CARD_W, 10, style="F")
     pdf.set_text_color(255, 255, 255); pdf.set_font("Helvetica", "B", 10)
     pdf.set_xy(x + 2, y + 2)
     pdf.cell(0, 6, _t("DOJO KARATÉ"), ln=0)
     pdf.set_text_color(0, 0, 0)
+    # Photo (18 x 22 mm) à gauche
+    photo = get_member_photo(m)
+    if photo:
+        try:
+            pdf.image(photo, x + 2, y + 13, 18, 22)
+        except Exception:
+            pass
+    # Bloc texte à droite de la photo
+    txt_x = x + 22
     pdf.set_font("Helvetica", "B", 10)
-    pdf.set_xy(x + 2, y + 12)
-    pdf.cell(0, 5, _t(f"{m['first_name']} {m['last_name']}"[:26]), ln=1)
+    pdf.set_xy(txt_x, y + 13)
+    pdf.cell(0, 5, _t(f"{m['first_name']} {m['last_name']}"[:22]), ln=1)
     pdf.set_font("Helvetica", "", 8)
-    pdf.set_xy(x + 2, y + 19); pdf.cell(0, 4, _t(f"Grade : {m.get('grade') or '—'}"), ln=1)
-    pdf.set_xy(x + 2, y + 24); pdf.cell(0, 4, _t(f"Licence : {m.get('license_number') or '—'}"), ln=1)
+    pdf.set_xy(txt_x, y + 19)
+    pdf.cell(0, 4, _t(f"Grade : {m.get('grade') or '—'}"[:24]), ln=1)
+    pdf.set_xy(txt_x, y + 24)
+    pdf.cell(0, 4, _t(f"Lic. : {m.get('license_number') or '—'}"[:24]), ln=1)
     pdf.set_font("Helvetica", "I", 6); pdf.set_text_color(120, 120, 120)
-    pdf.set_xy(x + 2, y + 29); pdf.cell(0, 4, _t(f"ID : {m['id']:06d}"), ln=1)
+    pdf.set_xy(txt_x, y + 29)
+    pdf.cell(0, 4, _t(f"ID : {m['id']:06d}"), ln=1)
     pdf.set_text_color(0, 0, 0)
+    # QR en bas à droite
     if qr_path and os.path.exists(qr_path):
         pdf.image(qr_path, x + CARD_W - 26, y + CARD_H - 26, 24, 24)
+    # Pied
     pdf.set_font("Helvetica", "", 6); pdf.set_text_color(120, 120, 120)
     pdf.set_xy(x + 2, y + CARD_H - 6)
     pdf.cell(0, 4, _t(f"Émise le {date.today():%d/%m/%Y}"), ln=1)
@@ -650,6 +826,59 @@ def generate_batch_cards_pdf(members):
         _draw_card(pdf, x, y, m, qr_path)
     path = os.path.join(EXPORT_DIR, f"cartes_lot_{datetime.now():%Y%m%d_%H%M}.pdf")
     pdf.output(path); return path
+
+
+def generate_trombinoscope_pdf(members, title="Trombinoscope"):
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, _t(title), ln=True, align="C")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 5, _t(f"Effectif : {len(members)} — Édité le {date.today():%d/%m/%Y}"),
+             ln=True, align="C")
+    pdf.ln(4)
+
+    per_row, per_col = 4, 5
+    per_page = per_row * per_col
+    cell_w, cell_h = 45, 50
+    margin_x, margin_y = 12, 25
+    gap_x, gap_y = 3, 2
+
+    for i, m in enumerate(members):
+        pos = i % per_page
+        if pos == 0 and i > 0:
+            pdf.add_page()
+            margin_y = 15
+        col, row = pos % per_row, pos // per_row
+        x = margin_x + col * (cell_w + gap_x)
+        y = margin_y + row * (cell_h + gap_y)
+
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_fill_color(250, 250, 250)
+        pdf.rect(x, y, cell_w, cell_h, style="DF")
+
+        photo = get_member_photo(m)
+        if photo:
+            try:
+                pdf.image(photo, x + 2.5, y + 2, 40, 40)
+            except Exception:
+                pass
+
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_xy(x, y + 43)
+        pdf.cell(cell_w, 4,
+                 _t(f"{m['first_name']} {m['last_name']}"[:24]), align="C")
+
+        pdf.set_font("Helvetica", "I", 7)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_xy(x, y + 46.5)
+        pdf.cell(cell_w, 3, _t((m.get("grade") or "—")[:26]), align="C")
+        pdf.set_text_color(0, 0, 0)
+
+    path = os.path.join(EXPORT_DIR, f"trombinoscope_{datetime.now():%Y%m%d_%H%M}.pdf")
+    pdf.output(path)
+    return path
 
 
 # ============================================================
@@ -789,7 +1018,6 @@ def page_dashboard():
         reste = (p["amount"] or 0) - (p.get("amount_paid") or 0)
         alerts.append(f"💰 Impayé {reste:.0f} DA — {p['first_name']} {p['last_name']}")
 
-    # Détection absences répétées
     for m in active:
         recent = fetch_all("""SELECT status FROM attendance
                               WHERE member_id=?
@@ -808,8 +1036,9 @@ def page_dashboard():
 
 def page_members():
     st.title("👥 Membres")
-    t1, t2, t3, t4, t5 = st.tabs(
-        ["📋 Liste", "➕ Ajouter", "✏️ Modifier", "🔍 Détails", "🗄️ Archivés"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(
+        ["📋 Liste", "➕ Ajouter", "✏️ Modifier", "🔍 Détails", "🗄️ Archivés",
+         "📥 Importer CSV"])
 
     # --- LISTE ---
     with t1:
@@ -835,6 +1064,39 @@ def page_members():
 
     # --- AJOUTER ---
     with t2:
+        # Signature électronique (hors form, sinon st_canvas plante)
+        with st.expander("✍️ Signature parentale électronique (mineurs — optionnel)",
+                         expanded=False):
+            if HAS_CANVAS:
+                st.caption("Signez ci-dessous à la souris / au doigt. "
+                           "Signature conservée lors de la validation du formulaire.")
+                col_sig, col_btn = st.columns([4, 1])
+                with col_sig:
+                    canvas_result = st_canvas(
+                        fill_color="rgba(0,0,0,0)",
+                        stroke_width=2.5,
+                        stroke_color="#1a1a2e",
+                        background_color="#ffffff",
+                        height=150, width=500,
+                        drawing_mode="freedraw",
+                        key="add_member_sig_canvas",
+                    )
+                    if canvas_result.image_data is not None:
+                        alpha = canvas_result.image_data[..., 3]
+                        if alpha.max() > 0:
+                            st.session_state["pending_signature"] = canvas_result.image_data
+                with col_btn:
+                    st.write("")
+                    st.write("")
+                    if st.button("🗑️ Effacer", key="clear_sig_add"):
+                        st.session_state.pop("pending_signature", None)
+                        st.rerun()
+                if st.session_state.get("pending_signature") is not None:
+                    st.success("✓ Signature capturée")
+            else:
+                st.warning("`streamlit-drawable-canvas` non installé. "
+                           "→ pip install streamlit-drawable-canvas")
+
         with st.form("add_m"):
             c1, c2, c3 = st.columns(3)
             fn = c1.text_input("Prénom *")
@@ -859,6 +1121,8 @@ def page_members():
             ins = c14.selectbox("Assurance", ["non", "oui"])
             ins_e = c15.date_input("Exp. assurance", value=date.today() + timedelta(days=365))
             parental = st.checkbox("Autorisation parentale (mineur)")
+            photo_file = st.file_uploader("📷 Photo de l'athlète (JPG/PNG)",
+                                           type=["jpg", "jpeg", "png"])
             nt = st.text_area("Notes")
 
             if st.form_submit_button("Ajouter", use_container_width=True):
@@ -872,16 +1136,26 @@ def page_members():
                         blood_group,academic_level,category,grade,grade_date,
                         discipline,license_number,license_expiry,medical_cert_expiry,
                         insurance_status,insurance_expiry,parental_authorization,
-                        documents_status,join_date,status,notes)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        documents_status,join_date,status,notes,photo)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (fn, ln, bd.isoformat(), gd, ph, em, ad, blood, academic, cat,
                          gr, date.today().isoformat(), disc, lic, le.isoformat(),
                          me.isoformat(), ins, ins_e.isoformat(), int(parental),
                          "Complet" if (lic and me) else "Incomplet",
-                         date.today().isoformat(), "Actif", nt))
+                         date.today().isoformat(), "Actif", nt, None))
+                    if photo_file is not None:
+                        photo_path = save_member_photo(mid, photo_file)
+                        if photo_path:
+                            execute("UPDATE members SET photo=? WHERE id=?",
+                                    (photo_path, mid))
+                    sig = st.session_state.get("pending_signature")
+                    if sig is not None:
+                        save_signature_to_db(mid, sig)
+                        st.session_state.pop("pending_signature", None)
                     m = fetch_one("SELECT * FROM members WHERE id=?", (mid,))
                     make_qr_code(m); export_members_csv()
-                    st.success(f"Ajouté : {fn} {ln} ({cat}). QR généré.")
+                    sig_txt = " + signature" if sig is not None else ""
+                    st.success(f"Ajouté : {fn} {ln} ({cat}){sig_txt}. QR généré.")
 
     # --- MODIFIER ---
     with t3:
@@ -907,16 +1181,57 @@ def page_members():
                 em = c6.text_input("Email", value=m.get("email") or "")
                 ad = st.text_input("Adresse", value=m.get("address") or "")
                 nt = st.text_area("Notes", value=m.get("notes") or "")
+                new_photo = st.file_uploader("📷 Remplacer la photo",
+                                              type=["jpg", "jpeg", "png"],
+                                              key=f"photo_edit_{m['id']}")
                 a, b, c = st.columns(3)
                 if a.form_submit_button("💾 Enregistrer", use_container_width=True):
                     execute("""UPDATE members SET first_name=?,last_name=?,grade=?,status=?,
                                phone=?,email=?,address=?,notes=? WHERE id=?""",
                             (fn, ln, gr, stt, ph, em, ad, nt, m["id"]))
+                    if new_photo is not None:
+                        path = save_member_photo(m["id"], new_photo)
+                        if path:
+                            execute("UPDATE members SET photo=? WHERE id=?",
+                                    (path, m["id"]))
                     export_members_csv()
                     st.success("Mis à jour."); st.rerun()
                 if b.form_submit_button("🗄️ Archiver", use_container_width=True):
                     execute("UPDATE members SET status='Archivé' WHERE id=?", (m["id"],))
                     st.success("Archivé."); st.rerun()
+
+            # Signature électronique — hors form
+            st.divider()
+            st.subheader("✍️ Signature parentale")
+            current_sig = m.get("parental_signature")
+            if current_sig:
+                render_signature_from_db(m)
+                if st.button("🗑️ Supprimer la signature", key=f"del_sig_{m['id']}"):
+                    execute("""UPDATE members SET parental_signature=NULL,
+                               signature_date=NULL WHERE id=?""", (m["id"],))
+                    st.success("Signature supprimée.")
+                    st.rerun()
+            elif HAS_CANVAS:
+                st.caption("Aucune signature. Pour en ajouter une, signez ci-dessous :")
+                canvas_result = st_canvas(
+                    fill_color="rgba(0,0,0,0)",
+                    stroke_width=2.5,
+                    stroke_color="#1a1a2e",
+                    background_color="#ffffff",
+                    height=150, width=500,
+                    drawing_mode="freedraw",
+                    key=f"edit_sig_canvas_{m['id']}",
+                )
+                if canvas_result.image_data is not None:
+                    alpha = canvas_result.image_data[..., 3]
+                    if alpha.max() > 0:
+                        if st.button("💾 Enregistrer la signature",
+                                     key=f"save_sig_{m['id']}", type="primary"):
+                            if save_signature_to_db(m["id"], canvas_result.image_data):
+                                st.success("Signature enregistrée.")
+                                st.rerun()
+            else:
+                st.caption("Installez `streamlit-drawable-canvas` pour activer.")
 
     # --- DÉTAILS ---
     with t4:
@@ -932,7 +1247,13 @@ def page_members():
             c2.metric("Grade", m["grade"] or "-")
             c3.metric("Statut", m["status"] or "-")
 
-            col_qr, col_act = st.columns([1, 2])
+            col_photo, col_qr, col_act = st.columns([1, 1, 2])
+            with col_photo:
+                photo = get_member_photo(m)
+                if photo:
+                    st.image(photo, caption="Photo", width=200)
+                else:
+                    st.info("Pas de photo")
             with col_qr:
                 if st.button("🔄 Générer QR", key=f"qr_gen_{m['id']}"):
                     st.session_state[f"qr_show_{m['id']}"] = True
@@ -952,6 +1273,10 @@ def page_members():
                         st.download_button("⬇️ Télécharger la fiche", f.read(),
                                             os.path.basename(pdf_path), "application/pdf",
                                             key=f"pdf_dl_{m['id']}")
+
+            if m.get("parental_signature"):
+                with st.expander("✍️ Signature parentale", expanded=False):
+                    render_signature_from_db(m)
 
             st.divider()
             sub1, sub2, sub3, sub4 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences", "👨‍👩‍👧 Parents"])
@@ -1019,10 +1344,69 @@ def page_members():
                 execute("UPDATE members SET status='Actif' WHERE id=?", (opts[sel]["id"],))
                 st.success("Restauré."); st.rerun()
 
+    # --- IMPORTER CSV ---
+    with t6:
+        st.subheader("📥 Import en masse de membres")
+        st.markdown("""
+        Importez un fichier CSV pour créer plusieurs membres d'un coup.
+        Les colonnes **`first_name`** et **`last_name`** sont obligatoires.
+        La catégorie et la date d'inscription sont calculées automatiquement.
+        """)
+
+        with st.expander("📄 Format attendu (colonnes acceptées)", expanded=False):
+            st.code("""first_name,last_name,birth_date,gender,phone,email,address,blood_group,academic_level,grade,discipline,license_number,notes
+Yacine,Benali,2010-03-15,M,0550123456,yacine@mail.dz,"12 Rue des Oliviers, Tlemcen",O+,5e année,Orange,Kata,LIC-2025-001,
+Amine,Cherif,2008-07-22,M,0550234567,amine@mail.dz,"5 Av. Pasteur, Tlemcen",A+,2e AS,Verte,Kumite,LIC-2025-002,Assidu
+""", language="csv")
+            st.caption("• `birth_date` au format YYYY-MM-DD  •  `grade` doit exister "
+                       "dans la liste officielle (sinon → Blanche)  •  "
+                       "les colonnes manquantes sont laissées vides.")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.download_button("⬇️ Télécharger le modèle CSV",
+                                csv_template_bytes(),
+                                "modele_import_membres.csv", "text/csv",
+                                use_container_width=True)
+        with col_b:
+            if st.button("🔄 Exporter la liste actuelle",
+                         use_container_width=True):
+                p = export_members_csv()
+                if p:
+                    with open(p, "rb") as f:
+                        st.download_button("⬇️ Télécharger", f.read(),
+                                            os.path.basename(p), "text/csv",
+                                            key="dl_export_members_import")
+
+        st.divider()
+        up_csv = st.file_uploader("Fichier CSV à importer",
+                                   type=["csv"], key="csv_import")
+        if up_csv is not None:
+            try:
+                preview = pd.read_csv(up_csv, dtype=str).fillna("").head(5)
+                st.caption("Aperçu des 5 premières lignes :")
+                st.dataframe(preview, use_container_width=True)
+                up_csv.seek(0)
+            except Exception as e:
+                st.error(f"CSV illisible : {e}")
+
+            if st.button("🚀 Lancer l'import", type="primary",
+                         use_container_width=True):
+                with st.spinner("Import en cours..."):
+                    n_ok, errs = import_members_from_csv(up_csv)
+                if n_ok:
+                    st.success(f"✅ {n_ok} membre(s) importé(s) avec succès.")
+                if errs:
+                    with st.expander(f"⚠️ {len(errs)} erreur(s)", expanded=True):
+                        for e in errs[:50]:
+                            st.write(f"• {e}")
+                st.rerun()
+
 
 def page_courses():
     st.title("📅 Cours et planning")
-    t1, t2, t3 = st.tabs(["📅 Planning", "📋 Liste", "👥 Inscriptions"])
+    t1, t2, t3, t4 = st.tabs(["📅 Planning", "📋 Liste", "👥 Inscriptions",
+                              "📸 Photos de classe"])
 
     with t1:
         courses = fetch_all("SELECT * FROM courses WHERE active=1")
@@ -1112,6 +1496,78 @@ def page_courses():
                 df["Nom"] = df["first_name"] + " " + df["last_name"]
                 st.dataframe(df[["id", "cours", "Nom", "date_enrolled"]],
                              use_container_width=True, hide_index=True)
+
+    # --- PHOTOS DE CLASSE ---
+    with t4:
+        st.subheader("📸 Photos de classe")
+        cs = fetch_all("SELECT * FROM courses WHERE active=1 ORDER BY name")
+        if not cs:
+            st.info("Aucun cours actif.")
+        else:
+            copt = {f"{c['id']} — {c['name']}": c for c in cs}
+            csel = st.selectbox("Cours", list(copt.keys()), key="photo_cls_sel")
+            course = copt[csel]
+
+            members = fetch_all("""SELECT m.* FROM members m
+                                   JOIN enrollments e ON e.member_id=m.id
+                                   WHERE e.course_id=? AND m.status='Actif'
+                                   ORDER BY m.last_name, m.first_name""",
+                                (course["id"],))
+            if not members:
+                st.info("Aucun membre inscrit à ce cours.")
+            else:
+                info1, info2, info3 = st.columns(3)
+                info1.metric("Inscrits", len(members))
+                info2.metric("Prof", course.get("teacher") or "—")
+                info3.metric("Salle", course.get("room") or "—")
+
+                st.divider()
+                cols = st.columns(4)
+                for i, m in enumerate(members):
+                    with cols[i % 4]:
+                        photo = get_member_photo(m)
+                        if photo:
+                            st.image(photo, use_container_width=True)
+                        else:
+                            st.markdown(
+                                "<div style='height:170px;background:#f0f0f0;"
+                                "display:flex;align-items:center;"
+                                "justify-content:center;border-radius:8px;"
+                                "color:#999;font-size:14px'>Pas de photo</div>",
+                                unsafe_allow_html=True)
+                        st.markdown(f"**{full_name(m)}**  \n"
+                                    f"<small>{m.get('grade') or '—'} · "
+                                    f"{m.get('category') or '—'}</small>",
+                                    unsafe_allow_html=True)
+                        st.write("")
+
+                st.divider()
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📄 Trombinoscope du cours",
+                                 type="primary", use_container_width=True):
+                        title = f"Trombinoscope — {course['name']}"
+                        path = generate_trombinoscope_pdf(members, title=title)
+                        st.session_state["ttb_course_path"] = path
+                with col2:
+                    if st.button("📄 Trombinoscope (tous cours confondus)",
+                                 use_container_width=True):
+                        all_active = fetch_all("""SELECT * FROM members
+                                                   WHERE status='Actif'
+                                                   ORDER BY last_name""")
+                        path = generate_trombinoscope_pdf(
+                            all_active, title="Trombinoscope général")
+                        st.session_state["ttb_course_path"] = path
+
+                if st.session_state.get("ttb_course_path"):
+                    p = st.session_state["ttb_course_path"]
+                    if os.path.exists(p):
+                        with open(p, "rb") as f:
+                            st.download_button("⬇️ Télécharger le PDF",
+                                                f.read(),
+                                                os.path.basename(p),
+                                                "application/pdf",
+                                                use_container_width=True)
 
 
 def page_attendance():
@@ -1510,7 +1966,8 @@ def page_qr_cards():
         st.info("Aucun membre actif.")
         return
 
-    t1, t2, t3 = st.tabs(["🪪 Carte individuelle", "📚 Cartes en lot", "🔗 QR seuls"])
+    t1, t2, t3, t4 = st.tabs(["🪪 Carte individuelle", "📚 Cartes en lot",
+                              "🔗 QR seuls", "🖼️ Trombinoscope"])
 
     with t1:
         opts = {f"{m['id']} — {full_name(m)}": m for m in ms}
@@ -1545,6 +2002,42 @@ def page_qr_cards():
                         st.download_button("⬇️", f.read(),
                                             os.path.basename(path), "image/png",
                                             key=f"dl_{m['id']}")
+
+    with t4:
+        st.subheader("🖼️ Trombinoscope général")
+        st.caption("Génère un PDF A4 avec 20 photos par page (grille 4×5).")
+
+        cats = sorted({m.get("category") or "—" for m in ms})
+        sel_cats = st.multiselect("Filtrer par catégorie", cats, default=cats)
+        filtered = [m for m in ms if (m.get("category") or "—") in sel_cats]
+
+        grades = sorted({m.get("grade") or "—" for m in filtered})
+        sel_grades = st.multiselect("Filtrer par grade", grades, default=grades)
+        filtered = [m for m in filtered if (m.get("grade") or "—") in sel_grades]
+
+        st.caption(f"**{len(filtered)} membre(s)** seront inclus "
+                   f"({(len(filtered) - 1) // 20 + 1 if filtered else 0} page(s)).")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🖼️ Générer le trombinoscope", type="primary",
+                         use_container_width=True, disabled=not filtered):
+                path = generate_trombinoscope_pdf(
+                    filtered, title="Trombinoscope général")
+                st.session_state["ttb_general_path"] = path
+        with col2:
+            if st.button("🔄 Régénérer depuis zéro", use_container_width=True):
+                st.session_state.pop("ttb_general_path", None)
+                st.rerun()
+
+        if st.session_state.get("ttb_general_path"):
+            p = st.session_state["ttb_general_path"]
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    st.download_button("⬇️ Télécharger le trombinoscope",
+                                        f.read(), os.path.basename(p),
+                                        "application/pdf",
+                                        use_container_width=True)
 
 
 def page_admin():
@@ -1628,6 +2121,7 @@ def page_admin():
         st.write(f"*Base de données* : {DB_PATH}")
         st.write(f"*Dossier exports* : {EXPORT_DIR}")
         st.write(f"*Dossier QR* : {QR_DIR}")
+        st.write(f"*Dossier photos* : {PHOTO_DIR}")
         st.write(f"*Dossier backups* : {BACKUP_DIR}")
         st.write(f"*Machine ID* : {machine_id()}")
         st.divider()
@@ -1652,11 +2146,18 @@ def page_my_space():
     c1.metric("Âge", calc_age(m["birth_date"]) or "-")
     c2.metric("Grade", m["grade"] or "-")
     c3.metric("Statut", m["status"])
-    if st.button("🔄 Afficher mon QR"):
-        st.session_state["myspace_qr"] = True
-    if st.session_state.get("myspace_qr"):
-        qr_path, _ = make_qr_code(m)
-        st.image(qr_path, width=180, caption="Mon QR")
+
+    cph, cqr = st.columns(2)
+    with cph:
+        photo = get_member_photo(m)
+        if photo:
+            st.image(photo, width=180, caption="Ma photo")
+    with cqr:
+        if st.button("🔄 Afficher mon QR"):
+            st.session_state["myspace_qr"] = True
+        if st.session_state.get("myspace_qr"):
+            qr_path, _ = make_qr_code(m)
+            st.image(qr_path, width=180, caption="Mon QR")
 
     st.divider()
     sub1, sub2, sub3 = st.tabs(["💰 Paiements", "🥋 Grades", "✅ Présences"])
@@ -1749,7 +2250,6 @@ if st.session_state.user is None:
 
 user = st.session_state.user
 
-# Vérification licence après login (mais avant accès aux données)
 if not license_gate():
     st.stop()
 
